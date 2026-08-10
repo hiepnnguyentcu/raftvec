@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VectorRecord {
     pub id: u64,
     pub embedding: Vec<f32>,

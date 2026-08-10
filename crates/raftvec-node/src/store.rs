@@ -1,4 +1,5 @@
 use raftvec_core::{brute_force_top_k, shard_id, ScoredId, VectorRecord};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use thiserror::Error;
@@ -129,6 +130,54 @@ impl Store {
             .sum();
         (names, total)
     }
+
+    /// Full-store snapshot for Raft's `RaftSnapshotBuilder`/`install_snapshot`
+    /// (technical design §6): a lagging or newly-joined replica catches up
+    /// by installing one of these instead of replaying the whole log.
+    pub fn snapshot(&self) -> StoreSnapshot {
+        let collections = self.collections.read().unwrap();
+        let snapshot = collections
+            .iter()
+            .map(|(name, coll)| {
+                (
+                    name.clone(),
+                    CollectionSnapshot {
+                        dim: coll.dim,
+                        shard_count: coll.shard_count,
+                        vectors: coll.vectors.read().unwrap().clone(),
+                    },
+                )
+            })
+            .collect();
+        StoreSnapshot { collections: snapshot }
+    }
+
+    pub fn restore(&self, snapshot: StoreSnapshot) {
+        let mut collections = self.collections.write().unwrap();
+        collections.clear();
+        for (name, snap) in snapshot.collections {
+            collections.insert(
+                name,
+                Collection {
+                    dim: snap.dim,
+                    shard_count: snap.shard_count,
+                    vectors: RwLock::new(snap.vectors),
+                },
+            );
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CollectionSnapshot {
+    dim: usize,
+    shard_count: u32,
+    vectors: HashMap<u64, VectorRecord>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct StoreSnapshot {
+    collections: HashMap<String, CollectionSnapshot>,
 }
 
 impl Default for Store {
@@ -195,5 +244,26 @@ mod tests {
         let store = Store::new();
         let err = store.search("nope", &[1.0], 1).unwrap_err();
         assert_eq!(err, StoreError::CollectionNotFound("nope".to_string()));
+    }
+
+    #[test]
+    fn snapshot_restore_round_trip_preserves_data() {
+        let store = Store::new();
+        store.create_collection("docs", 2, 3).unwrap();
+        store
+            .insert("docs", vec![rec(1, vec![1.0, 0.0]), rec(2, vec![0.0, 1.0])])
+            .unwrap();
+
+        let snapshot = store.snapshot();
+
+        let restored = Store::new();
+        restored.restore(snapshot);
+
+        let results = restored.search("docs", &[1.0, 0.0], 2).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, 1);
+        let (names, count) = restored.cluster_status();
+        assert_eq!(names, vec!["docs".to_string()]);
+        assert_eq!(count, 2);
     }
 }

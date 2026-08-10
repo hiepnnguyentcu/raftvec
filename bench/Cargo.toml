@@ -1,0 +1,16 @@
+[package]
+name = "bench"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+raftvec-proto = { path = "../crates/raftvec-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+rand = "0.8"

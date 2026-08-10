@@ -6,6 +6,7 @@ members = [
     "crates/raftvec-node",
     "crates/raftvec-aggregator",
     "crates/vecctl",
+    "bench",
 ]
 
 [workspace.package]

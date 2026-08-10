@@ -1,2 +1,80 @@
-//! Implements the same RaftVec gRPC service as raftvec-node, but delegates
-//! to the ShardRouter instead of a local Store. Implemented in the next step.
+use crate::router::{RouterError, ShardRouter};
+use raftvec_proto::raft_vec_server::RaftVec;
+use raftvec_proto::{
+    ClusterStatusRequest, ClusterStatusResponse, CreateCollectionRequest, CreateCollectionResponse,
+    DeleteRequest, DeleteResponse, InsertRequest, InsertResponse, SearchRequest, SearchResponse,
+};
+use std::sync::Arc;
+use tonic::{Request, Response, Status};
+
+/// Implements the exact same client-facing RaftVec service raftvec-node
+/// does (M1), but every method delegates to the ShardRouter instead of a
+/// local Store. This is what lets vecctl point at either a standalone node
+/// or this aggregator with zero client-side changes.
+pub struct AggregatorService {
+    router: Arc<ShardRouter>,
+}
+
+impl AggregatorService {
+    pub fn new(router: Arc<ShardRouter>) -> Self {
+        Self { router }
+    }
+}
+
+impl From<RouterError> for Status {
+    fn from(err: RouterError) -> Self {
+        match err {
+            RouterError::Connect { .. } => Status::unavailable(err.to_string()),
+            RouterError::Rpc(status) => status,
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl RaftVec for AggregatorService {
+    async fn create_collection(
+        &self,
+        request: Request<CreateCollectionRequest>,
+    ) -> Result<Response<CreateCollectionResponse>, Status> {
+        let req = request.into_inner();
+        self.router.create_collection(&req.name, req.dim).await?;
+        Ok(Response::new(CreateCollectionResponse { created: true }))
+    }
+
+    async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
+        let req = request.into_inner();
+        let inserted = self.router.insert(&req.collection, req.records).await?;
+        Ok(Response::new(InsertResponse { inserted }))
+    }
+
+    async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
+        let req = request.into_inner();
+        let deleted = self.router.delete(&req.collection, req.ids).await?;
+        Ok(Response::new(DeleteResponse { deleted }))
+    }
+
+    async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
+        let req = request.into_inner();
+        let (results, shards_queried, shards_failed) = self
+            .router
+            .search(&req.collection, req.query_vector, req.k)
+            .await;
+
+        Ok(Response::new(SearchResponse {
+            results,
+            shards_queried,
+            shards_failed,
+        }))
+    }
+
+    async fn cluster_status(
+        &self,
+        _request: Request<ClusterStatusRequest>,
+    ) -> Result<Response<ClusterStatusResponse>, Status> {
+        let (collections, vector_count) = self.router.cluster_status().await;
+        Ok(Response::new(ClusterStatusResponse {
+            collections,
+            vector_count,
+        }))
+    }
+}

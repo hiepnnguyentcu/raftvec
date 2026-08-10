@@ -1,0 +1,17 @@
+[package]
+name = "vecctl"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vecctl"
+path = "src/main.rs"
+
+[dependencies]
+raftvec-proto = { path = "../raftvec-proto" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

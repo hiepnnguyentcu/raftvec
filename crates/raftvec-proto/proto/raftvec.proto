@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package raftvec;
+
+// M1: served directly by a standalone raftvec-node.
+// M2+: this same contract is served by the aggregator, fanning out to shards.
+service RaftVec {
+  rpc CreateCollection(CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc Insert(InsertRequest) returns (InsertResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+}
+
+message VectorRecord {
+  uint64 id = 1;
+  repeated float embedding = 2;
+  map<string, string> metadata = 3;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dim = 2;
+  uint32 shard_count = 3;
+}
+
+message CreateCollectionResponse {
+  bool created = 1;
+}
+
+message InsertRequest {
+  string collection = 1;
+  repeated VectorRecord records = 2;
+}
+
+message InsertResponse {
+  uint32 inserted = 1;
+}
+
+message DeleteRequest {
+  string collection = 1;
+  repeated uint64 ids = 2;
+}
+
+message DeleteResponse {
+  uint32 deleted = 1;
+}
+
+message SearchRequest {
+  string collection = 1;
+  repeated float query_vector = 2;
+  uint32 k = 3;
+}
+
+message ScoredRecord {
+  uint64 id = 1;
+  float score = 2;
+  map<string, string> metadata = 3;
+}
+
+message SearchResponse {
+  repeated ScoredRecord results = 1;
+  uint32 shards_queried = 2;
+  uint32 shards_failed = 3;
+}
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+  repeated string collections = 1;
+  uint32 vector_count = 2;
+}

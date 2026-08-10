@@ -1,0 +1,12 @@
+[package]
+name = "raftvec-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+rayon = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+rand = "0.8"

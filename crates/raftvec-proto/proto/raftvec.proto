@@ -35,6 +35,12 @@ message InsertRequest {
 
 message InsertResponse {
   uint32 inserted = 1;
+  // Set (non-empty) when this replica is not the shard's current Raft
+  // leader and could not apply the write. Carries the current leader's
+  // address, translated from openraft's NodeId by the replica itself, so
+  // the aggregator never has to know about NodeIds -- just addresses to
+  // retry against (technical design §4.2, §5.1).
+  string leader_hint = 2;
 }
 
 message DeleteRequest {
@@ -44,6 +50,7 @@ message DeleteRequest {
 
 message DeleteResponse {
   uint32 deleted = 1;
+  string leader_hint = 2; // see InsertResponse.leader_hint
 }
 
 message SearchRequest {
@@ -62,6 +69,10 @@ message SearchResponse {
   repeated ScoredRecord results = 1;
   uint32 shards_queried = 2;
   uint32 shards_failed = 3;
+  // Set when this replica is not the shard's current Raft leader (v1 reads
+  // are leader-only, technical design §5.2, so NFR1's exact-equality
+  // claim doesn't depend on follower staleness). See InsertResponse.leader_hint.
+  string leader_hint = 4;
 }
 
 message ClusterStatusRequest {}

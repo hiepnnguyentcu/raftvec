@@ -142,7 +142,7 @@ async fn shard_replica_group_replicates_over_real_grpc() {
         .unwrap()
         .client_write(ShardCommand::Upsert {
             collection: "docs".to_string(),
-            record: rec(1, vec![1.0, 0.0, 0.0, 0.0]),
+            records: vec![rec(1, vec![1.0, 0.0, 0.0, 0.0])],
         })
         .await
         .unwrap();
@@ -162,7 +162,7 @@ async fn shard_replica_group_replicates_over_real_grpc() {
         .unwrap()
         .client_write(ShardCommand::Upsert {
             collection: "docs".to_string(),
-            record: rec(2, vec![0.0, 1.0, 0.0, 0.0]),
+            records: vec![rec(2, vec![0.0, 1.0, 0.0, 0.0])],
         })
         .await
         .unwrap();

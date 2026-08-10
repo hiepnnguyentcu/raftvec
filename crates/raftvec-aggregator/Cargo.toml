@@ -24,6 +24,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 raftvec-node = { path = "../raftvec-node" }
 rand = "0.8"
 tokio-stream = { version = "0.1", features = ["net"] }

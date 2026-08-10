@@ -1,4 +1,7 @@
+use crate::raft::{NodeId, Raft, ShardCommand};
 use crate::store::{Store, StoreError};
+use openraft::error::{ClientWriteError, RaftError};
+use openraft::BasicNode;
 use raftvec_core::VectorRecord;
 use raftvec_proto::raft_vec_server::RaftVec;
 use raftvec_proto::{
@@ -9,13 +12,57 @@ use raftvec_proto::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+/// One replica of one shard's Raft group. `store` is applied to only via
+/// committed Raft log entries for vector mutations (`insert`/`delete` go
+/// through `raft.client_write`); `create_collection`/`cluster_status`/reads
+/// touch it directly, since collection creation is out-of-band (not
+/// Raft-replicated, see raft.rs's `ShardCommand` doc comment) and reads are
+/// served only when this replica believes itself to be the current leader.
 pub struct NodeService {
     store: Arc<Store>,
+    raft: Raft,
+    node_id: NodeId,
+}
+
+enum Leadership {
+    IAmLeader,
+    Redirect(String),
+    Unknown,
 }
 
 impl NodeService {
-    pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<Store>, raft: Raft, node_id: NodeId) -> Self {
+        Self { store, raft, node_id }
+    }
+
+    /// Leader address resolved from openraft's own live membership metrics
+    /// -- not a separately-maintained map, so it can never drift from what
+    /// the Raft core itself believes.
+    async fn leadership(&self) -> Leadership {
+        let metrics = self.raft.metrics().borrow().clone();
+        match metrics.current_leader {
+            Some(id) if id == self.node_id => Leadership::IAmLeader,
+            Some(id) => match metrics.membership_config.membership().get_node(&id) {
+                Some(node) => Leadership::Redirect(node.addr.clone()),
+                None => Leadership::Unknown,
+            },
+            None => Leadership::Unknown,
+        }
+    }
+
+    /// `client_write` failed; either translate it into a leader address to
+    /// hand back to the caller, or a genuine error if none is known.
+    #[allow(clippy::result_large_err)]
+    fn write_error_to_hint(
+        err: RaftError<NodeId, ClientWriteError<NodeId, BasicNode>>,
+    ) -> Result<String, Status> {
+        match err {
+            RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => match fwd.leader_node {
+                Some(node) => Ok(node.addr),
+                None => Err(Status::unavailable("no leader currently known for this shard")),
+            },
+            other => Err(Status::internal(other.to_string())),
+        }
     }
 }
 
@@ -48,27 +95,72 @@ impl RaftVec for NodeService {
             .into_iter()
             .map(|r| VectorRecord::new(r.id, r.embedding, r.metadata))
             .collect();
+        let count = records.len() as u32;
 
-        let store = self.store.clone();
-        let collection = req.collection;
-        let inserted = tokio::task::spawn_blocking(move || store.insert(&collection, records))
+        match self
+            .raft
+            .client_write(ShardCommand::Upsert {
+                collection: req.collection,
+                records,
+            })
             .await
-            .map_err(|e| Status::internal(e.to_string()))??;
-
-        Ok(Response::new(InsertResponse {
-            inserted: inserted as u32,
-        }))
+        {
+            Ok(_) => Ok(Response::new(InsertResponse {
+                inserted: count,
+                leader_hint: String::new(),
+            })),
+            Err(e) => match Self::write_error_to_hint(e) {
+                Ok(hint) => Ok(Response::new(InsertResponse {
+                    inserted: 0,
+                    leader_hint: hint,
+                })),
+                Err(status) => Err(status),
+            },
+        }
     }
 
     async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
         let req = request.into_inner();
-        let deleted = self.store.delete(&req.collection, &req.ids)?;
-        Ok(Response::new(DeleteResponse {
-            deleted: deleted as u32,
-        }))
+        let count = req.ids.len() as u32;
+
+        match self
+            .raft
+            .client_write(ShardCommand::Delete {
+                collection: req.collection,
+                ids: req.ids,
+            })
+            .await
+        {
+            Ok(_) => Ok(Response::new(DeleteResponse {
+                deleted: count,
+                leader_hint: String::new(),
+            })),
+            Err(e) => match Self::write_error_to_hint(e) {
+                Ok(hint) => Ok(Response::new(DeleteResponse {
+                    deleted: 0,
+                    leader_hint: hint,
+                })),
+                Err(status) => Err(status),
+            },
+        }
     }
 
     async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
+        match self.leadership().await {
+            Leadership::Redirect(hint) => {
+                return Ok(Response::new(SearchResponse {
+                    results: vec![],
+                    shards_queried: 0,
+                    shards_failed: 0,
+                    leader_hint: hint,
+                }));
+            }
+            Leadership::Unknown => {
+                return Err(Status::unavailable("no leader currently known for this shard"));
+            }
+            Leadership::IAmLeader => {}
+        }
+
         let req = request.into_inner();
 
         // brute_force_top_k is a rayon-parallel scan; run it off the tokio
@@ -98,6 +190,7 @@ impl RaftVec for NodeService {
             results,
             shards_queried: 1,
             shards_failed: 0,
+            leader_hint: String::new(),
         }))
     }
 

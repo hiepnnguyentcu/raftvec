@@ -6,15 +6,19 @@
 //! same oracle-equality discipline as M1's tests/oracle_test.rs, extended
 //! across the network boundary sharding introduces.
 
+use openraft::{BasicNode, Config};
 use raftvec_aggregator::router::ShardRouter;
 use raftvec_core::VectorRecord as CoreRecord;
+use raftvec_node::raft::{LogStore, NodeId, ShardStateMachine};
+use raftvec_node::raft_network::{GrpcNetwork, ShardRaftService};
 use raftvec_node::service::NodeService;
 use raftvec_node::store::Store;
 use raftvec_proto::raft_vec_server::RaftVecServer;
+use raftvec_proto::shard_raft_server::ShardRaftServer;
 use raftvec_proto::VectorRecord as ProtoRecord;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -27,31 +31,70 @@ fn random_vector(rng: &mut StdRng, dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect()
 }
 
-/// Starts one real shard node (gRPC server over localhost TCP) and returns
-/// its address. Binding "127.0.0.1:0" and reading back the OS-assigned
-/// port avoids any fixed-port collisions between test runs.
-async fn spawn_shard_node() -> String {
+/// Starts one real shard node (gRPC server over localhost TCP) as a
+/// single-member Raft group of its own, and returns its address. A lone
+/// node in a 1-node group elects itself leader immediately, so this is
+/// enough to exercise the real NodeService write/read path (M3) while
+/// keeping this test's actual subject -- the aggregator's fan-out/merge --
+/// unchanged from M2. Binding "127.0.0.1:0" avoids fixed-port collisions.
+async fn spawn_shard_node(node_id: NodeId) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let self_addr = format!("http://{addr}");
 
     let store = Arc::new(Store::new());
-    let service = NodeService::new(store);
+    let log_store = LogStore::default();
+    let state_machine = Arc::new(ShardStateMachine::new(store.clone()));
+    let network = GrpcNetwork::default();
+    let config = Arc::new(
+        Config {
+            heartbeat_interval: 50,
+            election_timeout_min: 150,
+            election_timeout_max: 300,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap(),
+    );
+    let raft = openraft::Raft::new(node_id, config, network, log_store, state_machine)
+        .await
+        .unwrap();
+
+    let node_service = NodeService::new(store, raft.clone(), node_id);
+    let raft_service = ShardRaftService::new(raft.clone());
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(RaftVecServer::new(service))
+            .add_service(RaftVecServer::new(node_service))
+            .add_service(ShardRaftServer::new(raft_service))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .unwrap();
     });
 
-    format!("http://{addr}")
+    let mut members = BTreeMap::new();
+    members.insert(node_id, BasicNode { addr: self_addr.clone() });
+    raft.initialize(members).await.unwrap();
+
+    // The router's first request would otherwise race the (near-instant,
+    // but not synchronous) self-election and hit an "unknown leader"
+    // rejection.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if raft.metrics().borrow().current_leader == Some(node_id) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "node-{node_id} never became its own leader");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    self_addr
 }
 
 async fn spawn_router() -> ShardRouter {
     let mut addrs = Vec::with_capacity(SHARD_COUNT);
-    for _ in 0..SHARD_COUNT {
-        addrs.push(spawn_shard_node().await);
+    for shard_id in 0..SHARD_COUNT {
+        addrs.push(spawn_shard_node(shard_id as NodeId + 1).await);
     }
     ShardRouter::connect(&addrs, DEADLINE).await.unwrap()
 }

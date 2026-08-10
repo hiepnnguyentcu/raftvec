@@ -40,15 +40,20 @@ pub type Raft = openraft::Raft<TypeConfig>;
 /// does; only vector mutations are Raft-replicated -- `CreateCollection`
 /// stays an out-of-band call applied identically to every replica (M2
 /// pattern), since it is rare and not the property FR5 is about.
+///
+/// Carries a whole batch rather than one record/id, so a single (batched)
+/// gRPC Insert/Delete call becomes exactly one Raft log entry -- proposing
+/// one entry per record in a 1000-record batch would multiply both the
+/// replication round trips and the log size for no benefit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ShardCommand {
-    Upsert { collection: String, record: VectorRecord },
-    Delete { collection: String, id: u64 },
+    Upsert { collection: String, records: Vec<VectorRecord> },
+    Delete { collection: String, ids: Vec<u64> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardCommandResponse {
-    pub applied: bool,
+    pub applied_count: u32,
 }
 
 // ---------------------------------------------------------------------
@@ -209,26 +214,26 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
             *self.last_applied_log.write().await = Some(entry.log_id);
 
             match entry.payload {
-                EntryPayload::Blank => res.push(ShardCommandResponse { applied: false }),
+                EntryPayload::Blank => res.push(ShardCommandResponse { applied_count: 0 }),
                 EntryPayload::Normal(cmd) => {
                     // A rejection here (unknown collection, dim mismatch) is
                     // an application-level outcome, not a storage failure --
                     // every replica applies the same committed entry and
                     // must reach the same (non-fatal) outcome deterministically,
                     // rather than erroring the whole apply() call.
-                    let applied = match cmd {
-                        ShardCommand::Upsert { collection, record } => {
-                            self.store.insert(&collection, vec![record]).is_ok()
+                    let applied_count = match cmd {
+                        ShardCommand::Upsert { collection, records } => {
+                            self.store.insert(&collection, records).unwrap_or(0) as u32
                         }
-                        ShardCommand::Delete { collection, id } => {
-                            self.store.delete(&collection, &[id]).is_ok()
+                        ShardCommand::Delete { collection, ids } => {
+                            self.store.delete(&collection, &ids).unwrap_or(0) as u32
                         }
                     };
-                    res.push(ShardCommandResponse { applied });
+                    res.push(ShardCommandResponse { applied_count });
                 }
                 EntryPayload::Membership(mem) => {
                     *self.last_membership.write().await = StoredMembership::new(Some(entry.log_id), mem);
-                    res.push(ShardCommandResponse { applied: false });
+                    res.push(ShardCommandResponse { applied_count: 0 });
                 }
             }
         }
@@ -433,7 +438,7 @@ mod tests {
             .unwrap()
             .client_write(ShardCommand::Upsert {
                 collection: "docs".to_string(),
-                record: rec(1, vec![1.0, 0.0]),
+                records: vec![rec(1, vec![1.0, 0.0])],
             })
             .await
             .unwrap();
@@ -458,7 +463,7 @@ mod tests {
             .unwrap()
             .client_write(ShardCommand::Upsert {
                 collection: "docs".to_string(),
-                record: rec(2, vec![0.0, 1.0]),
+                records: vec![rec(2, vec![0.0, 1.0])],
             })
             .await
             .unwrap();

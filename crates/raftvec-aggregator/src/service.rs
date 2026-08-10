@@ -44,13 +44,21 @@ impl RaftVec for AggregatorService {
     async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
         let req = request.into_inner();
         let inserted = self.router.insert(&req.collection, req.records).await?;
-        Ok(Response::new(InsertResponse { inserted }))
+        // TODO(M3): router doesn't yet retry against a shard's current Raft
+        // leader on ForwardToLeader; that's the next increment.
+        Ok(Response::new(InsertResponse {
+            inserted,
+            leader_hint: String::new(),
+        }))
     }
 
     async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
         let req = request.into_inner();
         let deleted = self.router.delete(&req.collection, req.ids).await?;
-        Ok(Response::new(DeleteResponse { deleted }))
+        Ok(Response::new(DeleteResponse {
+            deleted,
+            leader_hint: String::new(),
+        }))
     }
 
     async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
@@ -64,6 +72,7 @@ impl RaftVec for AggregatorService {
             results,
             shards_queried,
             shards_failed,
+            leader_hint: String::new(),
         }))
     }
 

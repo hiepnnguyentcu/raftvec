@@ -1168,6 +1168,7 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
+ "openraft",
  "raftvec-core",
  "raftvec-node",
  "raftvec-proto",

@@ -92,11 +92,15 @@ async fn spawn_shard_node(node_id: NodeId) -> String {
 }
 
 async fn spawn_router() -> ShardRouter {
-    let mut addrs = Vec::with_capacity(SHARD_COUNT);
+    let mut shard_replica_addrs = Vec::with_capacity(SHARD_COUNT);
     for shard_id in 0..SHARD_COUNT {
-        addrs.push(spawn_shard_node(shard_id as NodeId + 1).await);
+        // One replica per shard here (a trivial single-member Raft group,
+        // see spawn_shard_node) -- this test's subject is the aggregator's
+        // fan-out/merge, not replica-set failover, which raftvec-node's
+        // own tests already cover.
+        shard_replica_addrs.push(vec![spawn_shard_node(shard_id as NodeId + 1).await]);
     }
-    ShardRouter::connect(&addrs, DEADLINE).await.unwrap()
+    ShardRouter::connect(&shard_replica_addrs, DEADLINE).await.unwrap()
 }
 
 #[tokio::test]

@@ -6,14 +6,16 @@ use raftvec_proto::{
     SearchRequest, VectorRecord,
 };
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tonic::transport::Channel;
-use tonic::Status;
+use tonic::{Response, Status};
 
 #[derive(Debug, Error)]
 pub enum RouterError {
-    #[error("failed to connect to shard node at {addr}: {source}")]
+    #[error("failed to connect to shard replica at {addr}: {source}")]
     Connect {
         addr: String,
         #[source]
@@ -21,19 +23,29 @@ pub enum RouterError {
     },
     #[error("shard rpc failed: {0}")]
     Rpc(#[from] Status),
+    #[error("no replica of this shard responded")]
+    ShardUnreachable,
 }
 
-/// Stateless routing/fan-out over a fixed set of shard nodes. Shard count
-/// is simply the number of configured shard addresses -- there is no
-/// MetaRaft yet (that's M3), so the aggregator's own static shard list IS
-/// the topology (technical design §2.2, §3: shard count fixed at
-/// collection creation, static hash routing).
-///
-/// `shard_clients[i]` must be shard `i`: `connect` builds the list in the
-/// same order the caller supplies addresses in, and every routing decision
-/// below (`shard_id(id, shard_count) as usize`) indexes into it directly.
+/// One shard's Raft group: all its replicas, plus a cached guess at which
+/// one is currently the leader. There is no MetaRaft (out of scope, see
+/// technical design's non-goals) -- the aggregator's own static config IS
+/// the shard->replica-address topology; only *leadership within* a shard's
+/// fixed replica set is discovered dynamically, via `leader_hint`.
+struct ShardReplicaSet {
+    clients: Vec<RaftVecClient<Channel>>,
+    addrs: Vec<String>,
+    /// Index into `clients`/`addrs` last known (or guessed) to be leader.
+    /// Relaxed ordering is enough: this is a best-effort cache to avoid
+    /// wasted round trips, not a correctness-load-bearing value -- a stale
+    /// guess just costs one extra retry, never a wrong answer.
+    leader_hint: AtomicUsize,
+}
+
+/// Stateless routing/fan-out over a fixed set of shards, each a fixed set
+/// of Raft replicas (technical design §2.2, §5.1).
 pub struct ShardRouter {
-    shard_clients: Vec<RaftVecClient<Channel>>,
+    shards: Vec<ShardReplicaSet>,
     /// Per-shard call deadline for search fan-out (technical design §5.3):
     /// a slow/dead shard degrades the result instead of hanging the query.
     deadline: Duration,
@@ -41,33 +53,64 @@ pub struct ShardRouter {
 
 const CONNECT_MAX_ATTEMPTS: u32 = 10;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+/// One attempt per replica plus one extra to follow a hint received on the
+/// last replica tried.
+const MAX_LEADER_ATTEMPTS: usize = 4;
+
+/// Implemented by every response type that carries a `leader_hint` field
+/// (InsertResponse/DeleteResponse/SearchResponse), so `call_with_retry` can
+/// stay generic over which RPC it's retrying.
+trait CarriesLeaderHint {
+    fn leader_hint(&self) -> &str;
+}
+
+impl CarriesLeaderHint for raftvec_proto::InsertResponse {
+    fn leader_hint(&self) -> &str {
+        &self.leader_hint
+    }
+}
+impl CarriesLeaderHint for raftvec_proto::DeleteResponse {
+    fn leader_hint(&self) -> &str {
+        &self.leader_hint
+    }
+}
+impl CarriesLeaderHint for raftvec_proto::SearchResponse {
+    fn leader_hint(&self) -> &str {
+        &self.leader_hint
+    }
+}
 
 impl ShardRouter {
-    /// Connects to every shard, retrying each with a fixed backoff before
-    /// giving up. Needed for docker-compose startup: the aggregator
-    /// container can win the race and start before a shard's listener is
-    /// up, and a hard failure on the first attempt would make every
-    /// `docker compose up` flaky rather than just slow.
-    pub async fn connect(addrs: &[String], deadline: Duration) -> Result<Self, RouterError> {
-        let mut shard_clients = Vec::with_capacity(addrs.len());
-        for addr in addrs {
-            shard_clients.push(connect_with_retry(addr).await?);
+    /// Connects to every replica of every shard, retrying each with a
+    /// fixed backoff before giving up (docker-compose startup: a replica's
+    /// listener may not be up yet when the aggregator container starts).
+    pub async fn connect(shard_replica_addrs: &[Vec<String>], deadline: Duration) -> Result<Self, RouterError> {
+        let mut shards = Vec::with_capacity(shard_replica_addrs.len());
+        for addrs in shard_replica_addrs {
+            let mut clients = Vec::with_capacity(addrs.len());
+            for addr in addrs {
+                clients.push(connect_with_retry(addr).await?);
+            }
+            shards.push(ShardReplicaSet {
+                clients,
+                addrs: addrs.clone(),
+                leader_hint: AtomicUsize::new(0),
+            });
         }
-        Ok(Self {
-            shard_clients,
-            deadline,
-        })
+        Ok(Self { shards, deadline })
     }
 
     pub fn shard_count(&self) -> u32 {
-        self.shard_clients.len() as u32
+        self.shards.len() as u32
     }
 
-    /// Fans CreateCollection out to every shard; each shard independently
-    /// creates its own local slice of the collection under the same name.
+    /// Fans CreateCollection out to every replica of every shard; each
+    /// replica independently creates its own local slice of the collection
+    /// under the same name (not Raft-replicated -- see raftvec-node's
+    /// ShardCommand doc comment for why).
     pub async fn create_collection(&self, name: &str, dim: u32) -> Result<(), RouterError> {
         let shard_count = self.shard_count();
-        let calls = self.shard_clients.iter().cloned().map(|mut client| {
+        let calls = self.shards.iter().flat_map(|shard| shard.clients.iter().cloned()).map(|mut client| {
             let req = CreateCollectionRequest {
                 name: name.to_string(),
                 dim,
@@ -82,37 +125,35 @@ impl ShardRouter {
         Ok(())
     }
 
-    /// Groups records by `shard_id` and sends each group only to its shard
+    /// Groups records by `shard_id` and sends each group only to its
+    /// shard's current leader (retrying/following `leader_hint` as needed)
     /// -- the write path is the opposite of fan-out: exactly one shard per
     /// record, not all of them.
-    pub async fn insert(
-        &self,
-        collection: &str,
-        records: Vec<VectorRecord>,
-    ) -> Result<u32, RouterError> {
+    pub async fn insert(&self, collection: &str, records: Vec<VectorRecord>) -> Result<u32, RouterError> {
         let groups = self.group_by_shard(records, |r| r.id);
 
         let calls = self
-            .shard_clients
+            .shards
             .iter()
-            .cloned()
             .zip(groups)
             .filter(|(_, group)| !group.is_empty())
-            .map(|(mut client, group)| {
+            .map(|(shard, group)| {
                 let collection = collection.to_string();
                 async move {
-                    client
-                        .insert(InsertRequest {
-                            collection,
-                            records: group,
-                        })
-                        .await
+                    call_with_retry(shard, move |mut client| {
+                        let req = InsertRequest {
+                            collection: collection.clone(),
+                            records: group.clone(),
+                        };
+                        async move { client.insert(req).await }
+                    })
+                    .await
                 }
             });
 
         let mut inserted = 0u32;
         for result in join_all(calls).await {
-            inserted += result?.into_inner().inserted;
+            inserted += result?.inserted;
         }
         Ok(inserted)
     }
@@ -121,47 +162,51 @@ impl ShardRouter {
         let groups = self.group_by_shard(ids, |id| *id);
 
         let calls = self
-            .shard_clients
+            .shards
             .iter()
-            .cloned()
             .zip(groups)
             .filter(|(_, group)| !group.is_empty())
-            .map(|(mut client, group)| {
+            .map(|(shard, group)| {
                 let collection = collection.to_string();
-                async move { client.delete(DeleteRequest { collection, ids: group }).await }
+                async move {
+                    call_with_retry(shard, move |mut client| {
+                        let req = DeleteRequest {
+                            collection: collection.clone(),
+                            ids: group.clone(),
+                        };
+                        async move { client.delete(req).await }
+                    })
+                    .await
+                }
             });
 
         let mut deleted = 0u32;
         for result in join_all(calls).await {
-            deleted += result?.into_inner().deleted;
+            deleted += result?.deleted;
         }
         Ok(deleted)
     }
 
-    /// Fans the query out to every shard in parallel and merges the local
-    /// top-k lists into an exact global top-k (technical design §5.2: safe
-    /// because shards partition the corpus disjointly, so the true global
-    /// top-k is necessarily a subset of the union of local top-k sets). A
-    /// shard that doesn't answer within the deadline is dropped from the
-    /// merge and counted in `shards_failed` instead of failing the whole
-    /// query (§5.3).
-    pub async fn search(
-        &self,
-        collection: &str,
-        query_vector: Vec<f32>,
-        k: u32,
-    ) -> (Vec<ScoredRecord>, u32, u32) {
+    /// Fans the query out to every shard's current leader in parallel and
+    /// merges the local top-k lists into an exact global top-k (technical
+    /// design §5.2). A shard whose leader can't be reached/found within
+    /// the deadline is dropped from the merge and counted in
+    /// `shards_failed` instead of failing the whole query (§5.3).
+    pub async fn search(&self, collection: &str, query_vector: Vec<f32>, k: u32) -> (Vec<ScoredRecord>, u32, u32) {
         let deadline = self.deadline;
-        let calls = self.shard_clients.iter().cloned().map(|mut client| {
+        let calls = self.shards.iter().map(|shard| {
             let collection = collection.to_string();
             let query_vector = query_vector.clone();
             async move {
                 tokio::time::timeout(
                     deadline,
-                    client.search(SearchRequest {
-                        collection,
-                        query_vector,
-                        k,
+                    call_with_retry(shard, move |mut client| {
+                        let req = SearchRequest {
+                            collection: collection.clone(),
+                            query_vector: query_vector.clone(),
+                            k,
+                        };
+                        async move { client.search(req).await }
                     }),
                 )
                 .await
@@ -175,8 +220,8 @@ impl ShardRouter {
 
         for r in responses {
             match r {
-                Ok(Ok(resp)) => shard_lists.push(resp.into_inner().results),
-                _ => shards_failed += 1, // timed out, or the shard call itself errored
+                Ok(Ok(resp)) => shard_lists.push(resp.results),
+                _ => shards_failed += 1, // timed out finding a leader, or every replica errored
             }
         }
 
@@ -185,11 +230,20 @@ impl ShardRouter {
     }
 
     pub async fn cluster_status(&self) -> (Vec<String>, u32) {
-        let calls = self
-            .shard_clients
-            .iter()
-            .cloned()
-            .map(|mut client| async move { client.cluster_status(ClusterStatusRequest {}).await });
+        // Any replica's local count is representative enough for this
+        // observability endpoint (technical design §7 FR8) -- no need to
+        // route specifically to leaders here. But it must still try more
+        // than one replica: always querying index 0 silently under-counts
+        // the moment that one replica is down, which is exactly when this
+        // endpoint is most useful.
+        let calls = self.shards.iter().map(|shard| async move {
+            for mut client in shard.clients.iter().cloned() {
+                if let Ok(resp) = client.cluster_status(ClusterStatusRequest {}).await {
+                    return Some(resp);
+                }
+            }
+            None
+        });
 
         let mut collections: HashSet<String> = HashSet::new();
         let mut total = 0u32;
@@ -202,8 +256,8 @@ impl ShardRouter {
     }
 
     /// Buckets `items` into one `Vec` per shard, using `shard_id(key(item), shard_count)`
-    /// as the bucket index -- the same hash function every shard node also
-    /// runs on insert, so routing and storage agree on where a record lives.
+    /// as the bucket index -- the same hash function every shard replica
+    /// also runs on insert, so routing and storage agree on where a record lives.
     fn group_by_shard<T>(&self, items: Vec<T>, key: impl Fn(&T) -> u64) -> Vec<Vec<T>> {
         let shard_count = self.shard_count();
         let mut groups: Vec<Vec<T>> = (0..shard_count).map(|_| Vec::new()).collect();
@@ -213,6 +267,45 @@ impl ShardRouter {
         }
         groups
     }
+}
+
+/// Calls `make_request` against `shard`'s cached leader guess; if the
+/// replica says it isn't leader (`leader_hint` non-empty in the response)
+/// or is unreachable, follows the hint (or just advances to the next
+/// replica) and retries, up to `MAX_LEADER_ATTEMPTS` times (technical
+/// design §5.1: bounded retry rather than retrying forever).
+async fn call_with_retry<F, Fut, R>(shard: &ShardReplicaSet, mut make_request: F) -> Result<R, RouterError>
+where
+    F: FnMut(RaftVecClient<Channel>) -> Fut,
+    Fut: Future<Output = Result<Response<R>, Status>>,
+    R: CarriesLeaderHint,
+{
+    let mut idx = shard.leader_hint.load(Ordering::Relaxed) % shard.clients.len();
+    let mut last_err: Option<RouterError> = None;
+
+    for _ in 0..MAX_LEADER_ATTEMPTS {
+        let client = shard.clients[idx].clone();
+        match make_request(client).await {
+            Ok(response) => {
+                let response = response.into_inner();
+                if response.leader_hint().is_empty() {
+                    shard.leader_hint.store(idx, Ordering::Relaxed);
+                    return Ok(response);
+                }
+                idx = shard
+                    .addrs
+                    .iter()
+                    .position(|a| a == response.leader_hint())
+                    .unwrap_or((idx + 1) % shard.clients.len());
+            }
+            Err(status) => {
+                last_err = Some(RouterError::Rpc(status));
+                idx = (idx + 1) % shard.clients.len();
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or(RouterError::ShardUnreachable))
 }
 
 async fn connect_with_retry(addr: &str) -> Result<RaftVecClient<Channel>, RouterError> {

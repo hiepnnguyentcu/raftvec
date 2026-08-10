@@ -26,6 +26,7 @@ impl From<RouterError> for Status {
         match err {
             RouterError::Connect { .. } => Status::unavailable(err.to_string()),
             RouterError::Rpc(status) => status,
+            RouterError::ShardUnreachable => Status::unavailable(err.to_string()),
         }
     }
 }
@@ -44,8 +45,10 @@ impl RaftVec for AggregatorService {
     async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
         let req = request.into_inner();
         let inserted = self.router.insert(&req.collection, req.records).await?;
-        // TODO(M3): router doesn't yet retry against a shard's current Raft
-        // leader on ForwardToLeader; that's the next increment.
+        // The router already resolved leadership internally (retrying
+        // against each shard's current leader) -- by the time we get an
+        // Ok here there's nothing left to hint the aggregator's own caller
+        // about.
         Ok(Response::new(InsertResponse {
             inserted,
             leader_hint: String::new(),

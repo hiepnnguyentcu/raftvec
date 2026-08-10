@@ -1,0 +1,6 @@
+target
+.venv
+.git
+*.jsonl
+__pycache__
+*.pyc

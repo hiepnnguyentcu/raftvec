@@ -39,18 +39,19 @@ pub struct ShardRouter {
     deadline: Duration,
 }
 
+const CONNECT_MAX_ATTEMPTS: u32 = 10;
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 impl ShardRouter {
+    /// Connects to every shard, retrying each with a fixed backoff before
+    /// giving up. Needed for docker-compose startup: the aggregator
+    /// container can win the race and start before a shard's listener is
+    /// up, and a hard failure on the first attempt would make every
+    /// `docker compose up` flaky rather than just slow.
     pub async fn connect(addrs: &[String], deadline: Duration) -> Result<Self, RouterError> {
         let mut shard_clients = Vec::with_capacity(addrs.len());
         for addr in addrs {
-            let client =
-                RaftVecClient::connect(addr.clone())
-                    .await
-                    .map_err(|source| RouterError::Connect {
-                        addr: addr.clone(),
-                        source,
-                    })?;
-            shard_clients.push(client);
+            shard_clients.push(connect_with_retry(addr).await?);
         }
         Ok(Self {
             shard_clients,
@@ -212,6 +213,25 @@ impl ShardRouter {
         }
         groups
     }
+}
+
+async fn connect_with_retry(addr: &str) -> Result<RaftVecClient<Channel>, RouterError> {
+    let mut last_err = None;
+    for attempt in 0..CONNECT_MAX_ATTEMPTS {
+        match RaftVecClient::connect(addr.to_string()).await {
+            Ok(client) => return Ok(client),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < CONNECT_MAX_ATTEMPTS {
+                    tokio::time::sleep(CONNECT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(RouterError::Connect {
+        addr: addr.to_string(),
+        source: last_err.expect("loop runs at least once"),
+    })
 }
 
 /// Merges several shards' local top-k lists (each already ranked) into one

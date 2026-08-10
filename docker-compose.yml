@@ -1,0 +1,78 @@
+# 4-shard RaftVec cluster (M2: sharding + fan-out, no replication yet --
+# each shard is a single node here; Raft replication is M3).
+#
+#   docker compose up -d --build
+#   docker compose run --rm vecctl --addr http://aggregator:50060 \
+#       create-collection --collection docs --dim 384 --shard-count 4
+#   docker compose run --rm vecctl --addr http://aggregator:50060 \
+#       search --collection docs --query-vector 0.1,0.2,... -k 5
+#
+# Shard nodes bind 0.0.0.0 inside their container (not the CLI's default
+# 127.0.0.1) so the aggregator, on a different container, can reach them
+# over the compose network by service name.
+services:
+  shard0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: node
+    command: ["--listen", "0.0.0.0:50051"]
+    expose:
+      - "50051"
+
+  shard1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: node
+    command: ["--listen", "0.0.0.0:50051"]
+    expose:
+      - "50051"
+
+  shard2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: node
+    command: ["--listen", "0.0.0.0:50051"]
+    expose:
+      - "50051"
+
+  shard3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: node
+    command: ["--listen", "0.0.0.0:50051"]
+    expose:
+      - "50051"
+
+  aggregator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: aggregator
+    command:
+      - "--listen"
+      - "0.0.0.0:50060"
+      - "--shards"
+      - "shard0:50051,shard1:50051,shard2:50051,shard3:50051"
+    ports:
+      - "50060:50060"
+    depends_on:
+      - shard0
+      - shard1
+      - shard2
+      - shard3
+
+  # Not started by default (`docker compose up` skips profiled services).
+  # Run one-off CLI commands against the cluster with:
+  #   docker compose run --rm vecctl --addr http://aggregator:50060 <args>
+  vecctl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: vecctl
+    profiles: ["tools"]
+    depends_on:
+      - aggregator

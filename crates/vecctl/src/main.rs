@@ -42,7 +42,9 @@ enum Cmd {
         file: Option<PathBuf>,
         #[arg(long)]
         id: Option<u64>,
-        #[arg(long, value_delimiter = ',')]
+        // allow_hyphen_values: without it, clap treats a negative
+        // component like "-0.5" as an unknown flag rather than a value.
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
         embedding: Option<Vec<f32>>,
     },
     /// Delete vectors by id.
@@ -60,7 +62,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "query_vector")]
         query: Option<String>,
         /// Raw query vector as comma-separated floats.
-        #[arg(long, value_delimiter = ',', conflicts_with = "query")]
+        #[arg(long, value_delimiter = ',', conflicts_with = "query", allow_hyphen_values = true)]
         query_vector: Option<Vec<f32>>,
         #[arg(short, long, default_value_t = 5)]
         k: u32,

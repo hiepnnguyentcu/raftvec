@@ -26,3 +26,4 @@ tracing-subscriber = { workspace = true }
 [dev-dependencies]
 raftvec-node = { path = "../raftvec-node" }
 rand = "0.8"
+tokio-stream = { version = "0.1", features = ["net"] }

@@ -47,7 +47,10 @@ mod tests {
             let count = *counts.get(&shard).unwrap_or(&0);
             // hash distribution should be within 10% of the ideal split
             let deviation = (count as f64 - expected as f64).abs() / expected as f64;
-            assert!(deviation < 0.10, "shard {shard} skewed: {count} vs expected {expected}");
+            assert!(
+                deviation < 0.10,
+                "shard {shard} skewed: {count} vs expected {expected}"
+            );
         }
     }
 }

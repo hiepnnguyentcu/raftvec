@@ -166,7 +166,11 @@ async fn search_skips_an_unresponsive_replica_instead_of_burning_the_whole_deadl
             "attempt {attempt}: should have been served by the healthy replica, \
              got shards_failed={shards_failed}"
         );
-        assert_eq!(results.len(), 1, "attempt {attempt}: expected the healthy replica's result");
+        assert_eq!(
+            results.len(),
+            1,
+            "attempt {attempt}: expected the healthy replica's result"
+        );
         assert!(
             elapsed < FAN_OUT_DEADLINE,
             "attempt {attempt}: took {elapsed:?} against a {FAN_OUT_DEADLINE:?} deadline -- \

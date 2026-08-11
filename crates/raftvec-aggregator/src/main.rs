@@ -63,7 +63,11 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     tracing::info!(shards = ?shard_replica_addrs, "connecting to shard replicas");
-    let router = ShardRouter::connect(&shard_replica_addrs, Duration::from_millis(args.deadline_ms)).await?;
+    let router = ShardRouter::connect(
+        &shard_replica_addrs,
+        Duration::from_millis(args.deadline_ms),
+    )
+    .await?;
     let service = AggregatorService::new(Arc::new(router));
 
     tracing::info!(addr = %args.listen, shard_count = shard_replica_addrs.len(), "raftvec-aggregator listening");

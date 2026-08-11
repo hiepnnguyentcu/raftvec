@@ -68,7 +68,9 @@ async fn wait_for_leader_change(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for a leader change away from {old_leader:?} on node-{probe}");
+            panic!(
+                "timed out waiting for a leader change away from {old_leader:?} on node-{probe}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -97,7 +99,12 @@ async fn isolated_former_leader_refuses_reads_after_losing_quorum() {
 
     let mut members = BTreeMap::new();
     for id in 1..=3u64 {
-        members.insert(id, BasicNode { addr: addrs[&id].clone() });
+        members.insert(
+            id,
+            BasicNode {
+                addr: addrs[&id].clone(),
+            },
+        );
     }
     rafts.get(&1).unwrap().initialize(members).await.unwrap();
 

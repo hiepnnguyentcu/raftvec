@@ -20,7 +20,10 @@ fn rec(id: u64, embedding: Vec<f32>) -> VectorRecord {
 
 /// Starts one real shard replica: its own Raft core plus a real gRPC
 /// server exposing ShardRaft on an OS-assigned localhost port.
-async fn spawn_shard_replica(node_id: NodeId, config: Arc<openraft::Config>) -> (String, Raft, Arc<Store>) {
+async fn spawn_shard_replica(
+    node_id: NodeId,
+    config: Arc<openraft::Config>,
+) -> (String, Raft, Arc<Store>) {
     let store = Arc::new(Store::new());
     store.create_collection("docs", 4, 1).unwrap();
 
@@ -97,7 +100,9 @@ async fn wait_for_leader_change(
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting for a leader change away from {old_leader:?} on node-{probe}");
+            panic!(
+                "timed out waiting for a leader change away from {old_leader:?} on node-{probe}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -129,7 +134,12 @@ async fn shard_replica_group_replicates_over_real_grpc() {
 
     let mut members = BTreeMap::new();
     for id in 1..=3u64 {
-        members.insert(id, BasicNode { addr: addrs[&id].clone() });
+        members.insert(
+            id,
+            BasicNode {
+                addr: addrs[&id].clone(),
+            },
+        );
     }
     rafts.get(&1).unwrap().initialize(members).await.unwrap();
 
@@ -145,14 +155,26 @@ async fn shard_replica_group_replicates_over_real_grpc() {
         .await
         .unwrap();
 
-    wait_for_replication(&stores, "docs", &[1.0, 0.0, 0.0, 0.0], 1, Duration::from_secs(2)).await;
+    wait_for_replication(
+        &stores,
+        "docs",
+        &[1.0, 0.0, 0.0, 0.0],
+        1,
+        Duration::from_secs(2),
+    )
+    .await;
 
     rafts.remove(&leader_id).unwrap().shutdown().await.unwrap();
     stores.remove(&leader_id);
 
     let remaining: Vec<u64> = rafts.keys().copied().collect();
-    let new_leader_id =
-        wait_for_leader_change(&rafts, remaining[0], Some(leader_id), Duration::from_secs(10)).await;
+    let new_leader_id = wait_for_leader_change(
+        &rafts,
+        remaining[0],
+        Some(leader_id),
+        Duration::from_secs(10),
+    )
+    .await;
     assert_ne!(new_leader_id, leader_id);
 
     rafts
@@ -165,5 +187,12 @@ async fn shard_replica_group_replicates_over_real_grpc() {
         .await
         .unwrap();
 
-    wait_for_replication(&stores, "docs", &[0.0, 1.0, 0.0, 0.0], 2, Duration::from_secs(2)).await;
+    wait_for_replication(
+        &stores,
+        "docs",
+        &[0.0, 1.0, 0.0, 0.0],
+        2,
+        Duration::from_secs(2),
+    )
+    .await;
 }

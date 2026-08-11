@@ -11,7 +11,11 @@ use rayon::prelude::*;
 /// This is the one scan implementation shared by raftvec-node and the
 /// correctness oracle's target path, so the oracle equality test exercises
 /// the store/apply path rather than two independently-written rankers.
-pub fn brute_force_top_k(records: &[(&VectorRecord, f32)], query: &[f32], k: usize) -> Vec<ScoredId> {
+pub fn brute_force_top_k(
+    records: &[(&VectorRecord, f32)],
+    query: &[f32],
+    k: usize,
+) -> Vec<ScoredId> {
     let query_norm_sq = norm_sq(query);
     records
         .par_iter()

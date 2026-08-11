@@ -115,12 +115,18 @@ fn store_search_matches_oracle_with_duplicate_scores() {
         VectorRecord::new(1, vec![1.0, 0.0], HashMap::new()),
         VectorRecord::new(2, vec![1.0, 0.0], HashMap::new()),
     ];
-    let reference: Vec<(u64, Vec<f32>)> = records.iter().map(|r| (r.id, r.embedding.clone())).collect();
+    let reference: Vec<(u64, Vec<f32>)> = records
+        .iter()
+        .map(|r| (r.id, r.embedding.clone()))
+        .collect();
     store.insert("docs", records).unwrap();
 
     let query = vec![1.0, 0.0];
     let expected = oracle_search(&reference, &query, 3);
     let actual = store.search("docs", &query, 3).unwrap();
     assert_matches_oracle(&actual, &expected);
-    assert_eq!(actual.iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2, 3]);
+    assert_eq!(
+        actual.iter().map(|s| s.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
 }

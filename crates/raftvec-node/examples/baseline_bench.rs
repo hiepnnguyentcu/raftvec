@@ -43,7 +43,10 @@ fn main() {
         store.insert("bench", batch).unwrap();
         id = batch_end;
     }
-    println!("inserted {N} vectors in {:.2}s", insert_start.elapsed().as_secs_f64());
+    println!(
+        "inserted {N} vectors in {:.2}s",
+        insert_start.elapsed().as_secs_f64()
+    );
 
     // Warm up (first query pays allocator/cache warmup cost).
     let warmup_query = random_vector(&mut rng, DIM);
@@ -63,6 +66,8 @@ fn main() {
     let p99 = percentile(&latencies_ms, 0.99);
     let mean: f64 = latencies_ms.iter().sum::<f64>() / latencies_ms.len() as f64;
 
-    println!("\n--- single-node scan baseline ({N} vectors, dim={DIM}, k={K}, {QUERIES} queries) ---");
+    println!(
+        "\n--- single-node scan baseline ({N} vectors, dim={DIM}, k={K}, {QUERIES} queries) ---"
+    );
     println!("mean: {mean:.2}ms  p50: {p50:.2}ms  p99: {p99:.2}ms");
 }

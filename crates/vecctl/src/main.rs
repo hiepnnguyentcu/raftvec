@@ -62,7 +62,12 @@ enum Cmd {
         #[arg(long, conflicts_with = "query_vector")]
         query: Option<String>,
         /// Raw query vector as comma-separated floats.
-        #[arg(long, value_delimiter = ',', conflicts_with = "query", allow_hyphen_values = true)]
+        #[arg(
+            long,
+            value_delimiter = ',',
+            conflicts_with = "query",
+            allow_hyphen_values = true
+        )]
         query_vector: Option<Vec<f32>>,
         #[arg(short, long, default_value_t = 5)]
         k: u32,
@@ -116,7 +121,8 @@ async fn main() -> Result<()> {
                 load_jsonl(&path)?
             } else {
                 let id = id.context("--id is required when not using --file")?;
-                let embedding = embedding.context("--embedding is required when not using --file")?;
+                let embedding =
+                    embedding.context("--embedding is required when not using --file")?;
                 vec![VectorRecord {
                     id,
                     embedding,
@@ -182,7 +188,10 @@ async fn main() -> Result<()> {
         }
 
         Cmd::Status => {
-            let resp = client.cluster_status(ClusterStatusRequest {}).await?.into_inner();
+            let resp = client
+                .cluster_status(ClusterStatusRequest {})
+                .await?
+                .into_inner();
             println!("collections: {:?}", resp.collections);
             println!("vector_count: {}", resp.vector_count);
         }

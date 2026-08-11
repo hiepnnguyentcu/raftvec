@@ -35,8 +35,14 @@ pub type Raft = openraft::Raft<TypeConfig>;
 /// out-of-band on every replica.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ShardCommand {
-    Upsert { collection: String, records: Vec<VectorRecord> },
-    Delete { collection: String, ids: Vec<u64> },
+    Upsert {
+        collection: String,
+        records: Vec<VectorRecord>,
+    },
+    Delete {
+        collection: String,
+        ids: Vec<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +92,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         })
     }
 
-    async fn save_committed(&mut self, committed: Option<LogId<NodeId>>) -> Result<(), StorageError<NodeId>> {
+    async fn save_committed(
+        &mut self,
+        committed: Option<LogId<NodeId>>,
+    ) -> Result<(), StorageError<NodeId>> {
         self.inner.lock().await.committed = committed;
         Ok(())
     }
@@ -104,7 +113,11 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         Ok(self.inner.lock().await.vote)
     }
 
-    async fn append<I>(&mut self, entries: I, callback: LogFlushed<TypeConfig>) -> Result<(), StorageError<NodeId>>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: LogFlushed<TypeConfig>,
+    ) -> Result<(), StorageError<NodeId>>
     where
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
     {
@@ -162,8 +175,8 @@ impl ShardStateMachine {
 
 impl RaftSnapshotBuilder<TypeConfig> for Arc<ShardStateMachine> {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        let bytes =
-            bincode::serialize(&self.store.snapshot()).map_err(|e| StorageIOError::read_state_machine(&e))?;
+        let bytes = bincode::serialize(&self.store.snapshot())
+            .map_err(|e| StorageIOError::read_state_machine(&e))?;
         let last_applied_log = *self.last_applied_log.read().await;
         let last_membership = self.last_membership.read().await.clone();
         let meta = SnapshotMeta {
@@ -183,14 +196,18 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
 
     async fn applied_state(
         &mut self,
-    ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, BasicNode>), StorageError<NodeId>> {
+    ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, BasicNode>), StorageError<NodeId>>
+    {
         Ok((
             *self.last_applied_log.read().await,
             self.last_membership.read().await.clone(),
         ))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> Result<Vec<ShardCommandResponse>, StorageError<NodeId>>
+    async fn apply<I>(
+        &mut self,
+        entries: I,
+    ) -> Result<Vec<ShardCommandResponse>, StorageError<NodeId>>
     where
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
     {
@@ -205,9 +222,10 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
                     // application-level outcome every replica reaches
                     // deterministically, not a storage failure.
                     let applied_count = match cmd {
-                        ShardCommand::Upsert { collection, records } => {
-                            self.store.insert(&collection, records).unwrap_or(0) as u32
-                        }
+                        ShardCommand::Upsert {
+                            collection,
+                            records,
+                        } => self.store.insert(&collection, records).unwrap_or(0) as u32,
                         ShardCommand::Delete { collection, ids } => {
                             self.store.delete(&collection, &ids).unwrap_or(0) as u32
                         }
@@ -215,7 +233,8 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
                     res.push(ShardCommandResponse { applied_count });
                 }
                 EntryPayload::Membership(mem) => {
-                    *self.last_membership.write().await = StoredMembership::new(Some(entry.log_id), mem);
+                    *self.last_membership.write().await =
+                        StoredMembership::new(Some(entry.log_id), mem);
                     res.push(ShardCommandResponse { applied_count: 0 });
                 }
             }
@@ -243,7 +262,9 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
         Ok(())
     }
 
-    async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
         // No snapshot cache: `build_snapshot` re-serializes the live Store
         // on demand rather than keeping a second copy in sync.
         Ok(None)
@@ -260,8 +281,8 @@ mod tests {
     use openraft::error::{InstallSnapshotError, RPCError, RaftError, RemoteError};
     use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
     use openraft::raft::{
-        AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-        VoteRequest, VoteResponse,
+        AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest,
+        InstallSnapshotResponse, VoteRequest, VoteResponse,
     };
     use openraft::Config;
     use std::collections::{BTreeMap, HashMap};
@@ -297,7 +318,11 @@ mod tests {
                 .await
                 .get(&self.target)
                 .cloned()
-                .ok_or_else(|| openraft::error::Unreachable::new(&std::io::Error::other("target not registered")))
+                .ok_or_else(|| {
+                    openraft::error::Unreachable::new(&std::io::Error::other(
+                        "target not registered",
+                    ))
+                })
         }
     }
 
@@ -306,7 +331,8 @@ mod tests {
             &mut self,
             req: AppendEntriesRequest<TypeConfig>,
             _option: RPCOption,
-        ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
+        ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>>
+        {
             let raft = self.target_raft().await?;
             raft.append_entries(req)
                 .await
@@ -317,8 +343,10 @@ mod tests {
             &mut self,
             req: InstallSnapshotRequest<TypeConfig>,
             _option: RPCOption,
-        ) -> Result<InstallSnapshotResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>>
-        {
+        ) -> Result<
+            InstallSnapshotResponse<NodeId>,
+            RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
+        > {
             let raft = self.target_raft().await?;
             raft.install_snapshot(req)
                 .await
@@ -409,7 +437,12 @@ mod tests {
 
         let mut members = BTreeMap::new();
         for id in 1..=3u64 {
-            members.insert(id, BasicNode { addr: format!("shard-replica-{id}") });
+            members.insert(
+                id,
+                BasicNode {
+                    addr: format!("shard-replica-{id}"),
+                },
+            );
         }
         rafts.get(&1).unwrap().initialize(members).await.unwrap();
 
@@ -436,8 +469,13 @@ mod tests {
         stores.remove(&leader_id);
 
         let remaining: Vec<u64> = rafts.keys().copied().collect();
-        let new_leader_id =
-            wait_for_leader_change(&rafts, remaining[0], Some(leader_id), Duration::from_secs(5)).await;
+        let new_leader_id = wait_for_leader_change(
+            &rafts,
+            remaining[0],
+            Some(leader_id),
+            Duration::from_secs(5),
+        )
+        .await;
         assert_ne!(new_leader_id, leader_id);
 
         rafts
@@ -453,7 +491,10 @@ mod tests {
         for (id, store) in &stores {
             let results = store.search("docs", &[0.0, 1.0], 1).unwrap();
             assert_eq!(results.len(), 1, "node-{id} missing post-failover record");
-            assert_eq!(results[0].id, 2, "node-{id} did not replicate post-failover write");
+            assert_eq!(
+                results[0].id, 2,
+                "node-{id} did not replicate post-failover write"
+            );
         }
     }
 }

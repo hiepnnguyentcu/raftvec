@@ -7,7 +7,9 @@
 //! bincode-serialized request/response as opaque bytes (`RaftMessage`).
 
 use crate::raft::{NodeId, Raft, TypeConfig};
-use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError, Unreachable};
+use openraft::error::{
+    InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError, Unreachable,
+};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
@@ -117,7 +119,8 @@ impl GrpcConnection {
         Resp: DeserializeOwned,
         E: std::error::Error + DeserializeOwned,
     {
-        let payload = bincode::serialize(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let payload =
+            bincode::serialize(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
 
         let mut client = self
             .network
@@ -161,8 +164,10 @@ impl RaftNetwork<TypeConfig> for GrpcConnection {
         &mut self,
         req: InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> Result<InstallSnapshotResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>>
-    {
+    ) -> Result<
+        InstallSnapshotResponse<NodeId>,
+        RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
+    > {
         self.call(RaftRpc::InstallSnapshot, req).await
     }
 
@@ -204,7 +209,10 @@ fn decode<T: DeserializeOwned>(request: Request<RaftMessage>) -> Result<T, Statu
 
 #[tonic::async_trait]
 impl ShardRaft for ShardRaftService {
-    async fn append_entries(&self, request: Request<RaftMessage>) -> Result<Response<RaftMessage>, Status> {
+    async fn append_entries(
+        &self,
+        request: Request<RaftMessage>,
+    ) -> Result<Response<RaftMessage>, Status> {
         let req: AppendEntriesRequest<TypeConfig> = decode(request)?;
         let result = self.raft.append_entries(req).await;
         encode(&result)
@@ -216,7 +224,10 @@ impl ShardRaft for ShardRaftService {
         encode(&result)
     }
 
-    async fn install_snapshot(&self, request: Request<RaftMessage>) -> Result<Response<RaftMessage>, Status> {
+    async fn install_snapshot(
+        &self,
+        request: Request<RaftMessage>,
+    ) -> Result<Response<RaftMessage>, Status> {
         let req: InstallSnapshotRequest<TypeConfig> = decode(request)?;
         let result = self.raft.install_snapshot(req).await;
         encode(&result)

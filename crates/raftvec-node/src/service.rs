@@ -30,7 +30,11 @@ enum Leadership {
 
 impl NodeService {
     pub fn new(store: Arc<Store>, raft: Raft, node_id: NodeId) -> Self {
-        Self { store, raft, node_id }
+        Self {
+            store,
+            raft,
+            node_id,
+        }
     }
 
     /// Leader address resolved from openraft's own membership metrics, so
@@ -56,7 +60,9 @@ impl NodeService {
         match err {
             RaftError::APIError(ClientWriteError::ForwardToLeader(fwd)) => match fwd.leader_node {
                 Some(node) => Ok(node.addr),
-                None => Err(Status::unavailable("no leader currently known for this shard")),
+                None => Err(Status::unavailable(
+                    "no leader currently known for this shard",
+                )),
             },
             other => Err(Status::internal(other.to_string())),
         }
@@ -85,7 +91,10 @@ impl RaftVec for NodeService {
         Ok(Response::new(CreateCollectionResponse { created: true }))
     }
 
-    async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
+    async fn insert(
+        &self,
+        request: Request<InsertRequest>,
+    ) -> Result<Response<InsertResponse>, Status> {
         let req = request.into_inner();
         let records: Vec<VectorRecord> = req
             .records
@@ -116,7 +125,10 @@ impl RaftVec for NodeService {
         }
     }
 
-    async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
+    async fn delete(
+        &self,
+        request: Request<DeleteRequest>,
+    ) -> Result<Response<DeleteResponse>, Status> {
         let req = request.into_inner();
         let count = req.ids.len() as u32;
 
@@ -142,7 +154,10 @@ impl RaftVec for NodeService {
         }
     }
 
-    async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
+    async fn search(
+        &self,
+        request: Request<SearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
         match self.leadership().await {
             Leadership::Redirect(hint) => {
                 return Ok(Response::new(SearchResponse {
@@ -153,7 +168,9 @@ impl RaftVec for NodeService {
                 }));
             }
             Leadership::Unknown => {
-                return Err(Status::unavailable("no leader currently known for this shard"));
+                return Err(Status::unavailable(
+                    "no leader currently known for this shard",
+                ));
             }
             Leadership::IAmLeader => {}
         }

@@ -7,9 +7,10 @@
 Kill a shard leader mid-traffic — the cluster keeps returning complete, correct results,
 with zero acknowledged writes lost.
 
+[![CI](https://github.com/hiepnnguyentcu/raftvec/actions/workflows/ci.yml/badge.svg)](https://github.com/hiepnnguyentcu/raftvec/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hiepnnguyentcu/raftvec?color=success)](https://github.com/hiepnnguyentcu/raftvec/releases/latest)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-32%20passing-brightgreen.svg)](#how-correctness-is-tested)
 [![Consensus](https://img.shields.io/badge/consensus-openraft-8250df.svg)](https://github.com/databendlabs/openraft)
 
 <img src="docs/img/chaos-timeline.png" alt="Live cluster metrics: a shard leader is killed at t=30s under 200 QPS sustained load. The p50 line never moves; only the p99 tail absorbs the failure, and the surviving replicas' election counters step at the moment of failover. All 18,001 requests succeeded." width="820"/>
@@ -48,10 +49,11 @@ The exactness argument is one sentence: shards partition the corpus disjointly, 
 
 ## Quickstart
 
-Requires Docker. One command brings up 2 shards × 3 replicas, the aggregator, Prometheus, and a pre-provisioned Grafana dashboard:
+Requires Docker. One command pulls the [prebuilt images](https://github.com/hiepnnguyentcu/raftvec/pkgs/container/raftvec-node) and brings up 2 shards × 3 replicas, the aggregator, Prometheus, and a pre-provisioned Grafana dashboard:
 
 ```bash
-docker compose up -d --build
+docker compose up -d
+# (use `docker compose up -d --build` instead to build from source)
 
 # create a collection and load vectors (JSONL: {"id", "embedding", "metadata"})
 docker compose run --rm --no-deps vecctl --addr http://aggregator:50060 \
@@ -133,7 +135,7 @@ Single-node scan baseline: 500K × 384-dim vectors, exact top-10 in **~28ms p50*
 
 ## How correctness is tested
 
-Four layers, each testing something the layer below cannot. All 32 run in CI-able `cargo test`.
+Four layers, each testing something the layer below cannot. All 32 run in `cargo test` on every push ([CI](https://github.com/hiepnnguyentcu/raftvec/actions/workflows/ci.yml)).
 
 1. **Unit** — cosine, bounded-heap top-k, hash distribution, and a bit-equality test proving the cached-norm scan path returns *identical bits* to the naive formula.
 2. **Oracle equality** — an independently written naive ranker is ground truth; the real path (parallel scan + heap eviction + tie-breaking) must match it exactly, id-for-id and score-for-score.

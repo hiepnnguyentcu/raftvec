@@ -6,10 +6,10 @@
 //! Usage: bench --addr http://127.0.0.1:50060 --dim 384 --qps 200 --duration-secs 60
 
 use clap::Parser;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use raftvec_proto::raft_vec_client::RaftVecClient;
 use raftvec_proto::SearchRequest;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

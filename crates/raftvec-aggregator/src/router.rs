@@ -95,7 +95,10 @@ impl ShardRouter {
     /// Connects to every replica of every shard, retrying each with a
     /// fixed backoff before giving up (docker-compose startup: a replica's
     /// listener may not be up yet when the aggregator container starts).
-    pub async fn connect(shard_replica_addrs: &[Vec<String>], deadline: Duration) -> Result<Self, RouterError> {
+    pub async fn connect(
+        shard_replica_addrs: &[Vec<String>],
+        deadline: Duration,
+    ) -> Result<Self, RouterError> {
         let mut shards = Vec::with_capacity(shard_replica_addrs.len());
         for addrs in shard_replica_addrs {
             let mut clients = Vec::with_capacity(addrs.len());
@@ -121,14 +124,18 @@ impl ShardRouter {
     /// ShardCommand doc comment for why).
     pub async fn create_collection(&self, name: &str, dim: u32) -> Result<(), RouterError> {
         let shard_count = self.shard_count();
-        let calls = self.shards.iter().flat_map(|shard| shard.clients.iter().cloned()).map(|mut client| {
-            let req = CreateCollectionRequest {
-                name: name.to_string(),
-                dim,
-                shard_count,
-            };
-            async move { client.create_collection(req).await }
-        });
+        let calls = self
+            .shards
+            .iter()
+            .flat_map(|shard| shard.clients.iter().cloned())
+            .map(|mut client| {
+                let req = CreateCollectionRequest {
+                    name: name.to_string(),
+                    dim,
+                    shard_count,
+                };
+                async move { client.create_collection(req).await }
+            });
 
         for result in join_all(calls).await {
             result?;
@@ -140,7 +147,11 @@ impl ShardRouter {
     /// shard's current leader (retrying/following `leader_hint` as needed)
     /// -- the write path is the opposite of fan-out: exactly one shard per
     /// record, not all of them.
-    pub async fn insert(&self, collection: &str, records: Vec<VectorRecord>) -> Result<u32, RouterError> {
+    pub async fn insert(
+        &self,
+        collection: &str,
+        records: Vec<VectorRecord>,
+    ) -> Result<u32, RouterError> {
         let groups = self.group_by_shard(records, |r| r.id);
 
         let calls = self
@@ -203,7 +214,12 @@ impl ShardRouter {
     /// design §5.2). A shard whose leader can't be reached/found within
     /// the deadline is dropped from the merge and counted in
     /// `shards_failed` instead of failing the whole query (§5.3).
-    pub async fn search(&self, collection: &str, query_vector: Vec<f32>, k: u32) -> (Vec<ScoredRecord>, u32, u32) {
+    pub async fn search(
+        &self,
+        collection: &str,
+        query_vector: Vec<f32>,
+        k: u32,
+    ) -> (Vec<ScoredRecord>, u32, u32) {
         let deadline = self.deadline;
         let calls = self.shards.iter().map(|shard| {
             let collection = collection.to_string();
@@ -222,7 +238,8 @@ impl ShardRouter {
                     }),
                 )
                 .await;
-                metrics::histogram!("raftvec_shard_query_duration_seconds").record(start.elapsed().as_secs_f64());
+                metrics::histogram!("raftvec_shard_query_duration_seconds")
+                    .record(start.elapsed().as_secs_f64());
                 result
             }
         });

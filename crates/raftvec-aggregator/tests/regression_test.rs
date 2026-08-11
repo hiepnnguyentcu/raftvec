@@ -69,7 +69,12 @@ async fn spawn_shard_node(node_id: NodeId) -> String {
     });
 
     let mut members = BTreeMap::new();
-    members.insert(node_id, BasicNode { addr: self_addr.clone() });
+    members.insert(
+        node_id,
+        BasicNode {
+            addr: self_addr.clone(),
+        },
+    );
     raft.initialize(members).await.unwrap();
 
     // The router's first request would otherwise race the (near-instant,
@@ -80,7 +85,10 @@ async fn spawn_shard_node(node_id: NodeId) -> String {
         if raft.metrics().borrow().current_leader == Some(node_id) {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "node-{node_id} never became its own leader");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "node-{node_id} never became its own leader"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
@@ -96,7 +104,9 @@ async fn spawn_router() -> ShardRouter {
         // own tests already cover.
         shard_replica_addrs.push(vec![spawn_shard_node(shard_id as NodeId + 1).await]);
     }
-    ShardRouter::connect(&shard_replica_addrs, DEADLINE).await.unwrap()
+    ShardRouter::connect(&shard_replica_addrs, DEADLINE)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -132,14 +142,21 @@ async fn sharded_cluster_matches_oracle_on_random_corpus() {
         let (cluster_results, shards_queried, shards_failed) =
             router.search("docs", query.clone(), k).await;
         assert_eq!(shards_queried, SHARD_COUNT as u32);
-        assert_eq!(shards_failed, 0, "no shard should fail in a healthy cluster");
+        assert_eq!(
+            shards_failed, 0,
+            "no shard should fail in a healthy cluster"
+        );
 
         let oracle_results = oracle.search("docs", &query, k as usize).unwrap();
 
         assert_eq!(cluster_results.len(), oracle_results.len());
         for (c, o) in cluster_results.iter().zip(oracle_results.iter()) {
             assert_eq!(c.id, o.id, "ranked id mismatch");
-            assert!((c.score - o.score).abs() < 1e-5, "score mismatch for id {}", c.id);
+            assert!(
+                (c.score - o.score).abs() < 1e-5,
+                "score mismatch for id {}",
+                c.id
+            );
         }
     }
 }
@@ -236,5 +253,8 @@ async fn sharded_cluster_ties_break_the_same_way_as_the_oracle() {
 
     let cluster_ids: Vec<u64> = cluster_results.iter().map(|r| r.id).collect();
     let oracle_ids: Vec<u64> = oracle_results.iter().map(|r| r.id).collect();
-    assert_eq!(cluster_ids, oracle_ids, "tie-break order must match the single-node oracle exactly");
+    assert_eq!(
+        cluster_ids, oracle_ids,
+        "tie-break order must match the single-node oracle exactly"
+    );
 }

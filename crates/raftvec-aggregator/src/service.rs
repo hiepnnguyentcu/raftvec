@@ -41,7 +41,10 @@ impl RaftVec for AggregatorService {
         Ok(Response::new(CreateCollectionResponse { created: true }))
     }
 
-    async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
+    async fn insert(
+        &self,
+        request: Request<InsertRequest>,
+    ) -> Result<Response<InsertResponse>, Status> {
         let req = request.into_inner();
         // The router resolves leadership internally, so there is nothing
         // to hint the aggregator's own caller about.
@@ -52,7 +55,10 @@ impl RaftVec for AggregatorService {
         }))
     }
 
-    async fn delete(&self, request: Request<DeleteRequest>) -> Result<Response<DeleteResponse>, Status> {
+    async fn delete(
+        &self,
+        request: Request<DeleteRequest>,
+    ) -> Result<Response<DeleteResponse>, Status> {
         let req = request.into_inner();
         let deleted = self.router.delete(&req.collection, req.ids).await?;
         Ok(Response::new(DeleteResponse {
@@ -61,7 +67,10 @@ impl RaftVec for AggregatorService {
         }))
     }
 
-    async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
+    async fn search(
+        &self,
+        request: Request<SearchRequest>,
+    ) -> Result<Response<SearchResponse>, Status> {
         let start = std::time::Instant::now();
         let req = request.into_inner();
         let (results, shards_queried, shards_failed) = self

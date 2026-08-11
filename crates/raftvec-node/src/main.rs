@@ -2,7 +2,9 @@ use anyhow::Context;
 use clap::Parser;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use openraft::{BasicNode, Config};
-use raftvec_node::metrics::{spawn_leader_election_watcher, spawn_replication_lag_gauge, spawn_vector_count_gauge};
+use raftvec_node::metrics::{
+    spawn_leader_election_watcher, spawn_replication_lag_gauge, spawn_vector_count_gauge,
+};
 use raftvec_node::raft::{LogStore, NodeId, ShardStateMachine};
 use raftvec_node::raft_network::{GrpcNetwork, ShardRaftService, MAX_MESSAGE_SIZE};
 use raftvec_node::service::NodeService;
@@ -62,8 +64,15 @@ fn parse_peers(peers: &[String]) -> anyhow::Result<BTreeMap<NodeId, BasicNode>> 
         let (id_str, addr) = p
             .split_once('=')
             .with_context(|| format!("peer '{p}' must be in id=addr form"))?;
-        let id: NodeId = id_str.parse().with_context(|| format!("bad peer id in '{p}'"))?;
-        members.insert(id, BasicNode { addr: normalize(addr) });
+        let id: NodeId = id_str
+            .parse()
+            .with_context(|| format!("bad peer id in '{p}'"))?;
+        members.insert(
+            id,
+            BasicNode {
+                addr: normalize(addr),
+            },
+        );
     }
     Ok(members)
 }

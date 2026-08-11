@@ -40,7 +40,12 @@ impl Store {
         }
     }
 
-    pub fn create_collection(&self, name: &str, dim: usize, shard_count: u32) -> Result<(), StoreError> {
+    pub fn create_collection(
+        &self,
+        name: &str,
+        dim: usize,
+        shard_count: u32,
+    ) -> Result<(), StoreError> {
         let mut collections = self.collections.write().unwrap();
         if collections.contains_key(name) {
             return Err(StoreError::CollectionExists(name.to_string()));
@@ -56,7 +61,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn insert(&self, collection: &str, records: Vec<VectorRecord>) -> Result<usize, StoreError> {
+    pub fn insert(
+        &self,
+        collection: &str,
+        records: Vec<VectorRecord>,
+    ) -> Result<usize, StoreError> {
         let collections = self.collections.read().unwrap();
         let coll = collections
             .get(collection)
@@ -97,7 +106,12 @@ impl Store {
         Ok(deleted)
     }
 
-    pub fn search(&self, collection: &str, query: &[f32], k: usize) -> Result<Vec<ScoredId>, StoreError> {
+    pub fn search(
+        &self,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<ScoredId>, StoreError> {
         let collections = self.collections.read().unwrap();
         let coll = collections
             .get(collection)
@@ -157,7 +171,9 @@ impl Store {
                 )
             })
             .collect();
-        StoreSnapshot { collections: snapshot }
+        StoreSnapshot {
+            collections: snapshot,
+        }
     }
 
     pub fn restore(&self, snapshot: StoreSnapshot) {
@@ -229,7 +245,9 @@ mod tests {
     fn dimension_mismatch_rejected() {
         let store = Store::new();
         store.create_collection("docs", 3, 1).unwrap();
-        let err = store.insert("docs", vec![rec(1, vec![1.0, 0.0])]).unwrap_err();
+        let err = store
+            .insert("docs", vec![rec(1, vec![1.0, 0.0])])
+            .unwrap_err();
         assert_eq!(
             err,
             StoreError::DimensionMismatch {

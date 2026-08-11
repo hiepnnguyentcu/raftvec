@@ -33,7 +33,8 @@ pub fn spawn_vector_count_gauge(store: Arc<Store>, node_id: NodeId) {
     tokio::spawn(async move {
         loop {
             let (_, total) = store.cluster_status();
-            metrics::gauge!("raftvec_vectors_total", "node_id" => node_id.to_string()).set(total as f64);
+            metrics::gauge!("raftvec_vectors_total", "node_id" => node_id.to_string())
+                .set(total as f64);
             tokio::time::sleep(VECTOR_COUNT_POLL_INTERVAL).await;
         }
     });

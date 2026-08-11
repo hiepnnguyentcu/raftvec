@@ -21,8 +21,8 @@ import json
 import sys
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim
-DATASET_NAME = "armanc/scientific_papers"
-DATASET_CONFIG = "arxiv"
+DATASET_NAME = "gfissore/arxiv-abstracts-2021"
+DATASET_CONFIG = None
 
 # Hand-picked fallback used when the Hugging Face dataset can't be reached
 # (offline machine, dataset renamed/removed upstream). Keeps

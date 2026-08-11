@@ -21,6 +21,24 @@ with zero acknowledged writes lost.
 
 ---
 
+## Features
+
+**Correctness & consistency**
+- Writes commit to a Raft majority of the owning shard before they're acknowledged — no acknowledged write is ever lost to a single node failure.
+- Reads pass a ReadIndex-style `ensure_linearizable()` quorum check before serving — an isolated ex-leader refuses to answer instead of returning stale data.
+- Per-shard search is exact brute-force cosine, not approximate — the distributed top-k is provably identical to a single-node scan over the same data, verified continuously by an oracle test.
+- Partial failures are surfaced, never hidden: `shards_failed > 0` in the response instead of a silently incomplete result.
+
+**Scale & performance**
+- Vectors partitioned across shards by `fxhash(id) % shard_count`; reads fan out to every shard in parallel and merge exactly.
+- Per-replica scan caches each vector's norm at insert time and parallelizes the score pass across cores with rayon, keeping a bounded top-k heap (O(threads·k) memory, not O(n)).
+- bincode (not JSON) on the Raft transport wire — ~2.7× smaller replication messages.
+
+**Operability**
+- Prometheus metrics + a pre-provisioned Grafana dashboard (query latency, per-shard latency, leader elections, replication lag, degraded-result count).
+- `chaos/` scripts for scripted leader kills, recovery-time trials, and a post-chaos write-integrity audit.
+- CI on every push (fmt, clippy, full test suite, Docker build); tagged releases build and publish versioned images to GHCR automatically.
+
 ## Why
 
 Most open-source vector databases implement the **search** half well — ANN indexing, sharding, query fan-out — and treat **distributed correctness** as future work. Sharding alone gives you scale but not durability: when a shard node dies, its slice of the index is gone, and every query silently returns incomplete results.
@@ -47,6 +65,22 @@ And because per-shard search is exact brute-force cosine over disjoint partition
 
 The exactness argument is one sentence: shards partition the corpus disjointly, so the global top-k is necessarily a subset of the union of per-shard top-k sets — merging by score loses nothing.
 
+### Write path
+
+<div align="center">
+<img src="docs/img/write-path.svg" alt="Write path: vecctl sends Insert to the aggregator, which hash-routes to the owning shard's cached leader; the leader replicates via Raft AppendEntries to a majority of followers, applies the committed entry to its local store, then acks back through the aggregator to the client." width="820"/>
+</div>
+
+A write only becomes visible to the caller after it has survived replication to a majority of its shard — killing any single replica afterward cannot lose it.
+
+### Read path
+
+<div align="center">
+<img src="docs/img/read-path.svg" alt="Read path: vecctl sends Search to the aggregator, which fans out to every shard's cached leader in parallel; each leader confirms quorum with ensure_linearizable, scans locally with cached norms and rayon, and returns its local top-k; the aggregator merges the union into the exact global top-k and reports shards_failed for any shard that didn't answer in time." width="820"/>
+</div>
+
+Every shard is queried in parallel and every leader proves it still holds quorum before answering, so a stale isolated replica can never contribute to the result — it can only be absent from it, which shows up as `shards_failed`.
+
 ## Quickstart
 
 Requires Docker. One command pulls the [prebuilt images](https://github.com/hiepnnguyentcu/raftvec/pkgs/container/raftvec-node) and brings up 2 shards × 3 replicas, the aggregator, Prometheus, and a pre-provisioned Grafana dashboard:
@@ -61,10 +95,12 @@ docker compose run --rm --no-deps vecctl --addr http://aggregator:50060 \
 docker compose run --rm --no-deps -v $(pwd):/data vecctl --addr http://aggregator:50060 \
     insert --collection docs --file /data/corpus.jsonl
 
-# search
+# search (embeds the query text locally with the same model used above)
 docker compose run --rm --no-deps vecctl --addr http://aggregator:50060 \
-    search --collection docs --query-vector 0.1,0.2,... -k 5
+    search --collection docs --query "your search text here" -k 5
 ```
+
+`--query` requires `python3` + the embedding deps on the machine running `vecctl` — use `cargo run -p vecctl` from the repo root rather than the container for this flag, or pass a precomputed vector directly via `--query-vector 0.1,0.2,...`.
 
 - Grafana: <http://localhost:3000> · Prometheus: <http://localhost:9090>
 
@@ -76,7 +112,34 @@ pip install sentence-transformers datasets
 python3 scripts/embed_corpus.py --output corpus.jsonl --limit 20000
 ```
 
-## The chaos demo
+## Demos
+
+### Search a real corpus
+
+Loaded with 2,000 real arXiv abstracts ([`scripts/embed_corpus.py`](scripts/embed_corpus.py), `all-MiniLM-L6-v2`, 384-dim):
+
+```console
+$ vecctl --addr http://localhost:50060 search --collection docs2 --query "gradient descent optimization" -k 5
+1. 0.351  id=1273  "This paper uncovers and explores the close relationship between Monte Carlo..."
+2. 0.345  id=484   "This paper is concerned with a shape sensitivity analysis of a viscous..."
+3. 0.338  id=1019  "The on-line shortest path problem is considered under various models..."
+4. 0.314  id=467   "Given a bipartite graph G = (V1,V2,E) where edges take on both positive..."
+5. 0.303  id=1143  "Gradient networks can be used to model the dominant structure of complex..."
+```
+
+`--query` embeds the text locally with the same model used to build the corpus and searches with the resulting vector; `--query-vector` accepts a raw comma-separated vector directly, for callers who already embed elsewhere.
+
+### Live metrics
+
+The Grafana dashboard mid-benchmark (80 QPS sustained against the corpus above — p50 3.7ms, p99 28.1ms, 7,201/7,201 ok):
+
+<div align="center">
+<img src="docs/img/grafana-dashboard.png" alt="Grafana dashboard showing query latency p50/p99, per-shard latency, Raft leader election count (flat — no elections during steady state), degraded-result count (zero), replication lag (zero, all followers caught up), and vectors-per-replica converging across all six replicas." width="820"/>
+</div>
+
+Provisioned automatically by `docker compose up -d` — no manual dashboard setup. Panels: end-to-end and per-shard query latency, leader-election count, degraded-result count (`shards_failed_total`), replication lag, and vectors-per-replica (a live check that every replica in a shard converges to the same count).
+
+### Kill a shard leader mid-traffic
 
 This is the demo the project exists for. Terminal 1 — sustained load:
 

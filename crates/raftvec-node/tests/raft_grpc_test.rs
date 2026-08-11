@@ -1,8 +1,6 @@
-//! Same replication + leader-failover scenario as raft.rs's own unit test,
-//! but over real gRPC/TCP between 3 separate server tasks instead of an
-//! in-process loopback -- this is the actual production transport path
-//! (technical design §1: "a distributed system that only works in one
-//! process proves nothing").
+//! Same replication + leader-failover scenario as raft.rs's unit test,
+//! but over real gRPC/TCP between separate server tasks — a distributed
+//! system that only works in one process proves nothing.
 
 use openraft::{BasicNode, Config};
 use raftvec_core::VectorRecord;

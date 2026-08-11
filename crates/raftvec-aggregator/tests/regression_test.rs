@@ -1,10 +1,8 @@
-//! The M2 exit criterion (product spec §9): "sharded cluster returns
-//! identical results to the single-node baseline." This spins up real
-//! shard nodes (actual gRPC servers over localhost TCP, not in-process
-//! function calls) behind a ShardRouter, and asserts every result exactly
-//! matches an independent single-node Store holding the same data -- the
-//! same oracle-equality discipline as M1's tests/oracle_test.rs, extended
-//! across the network boundary sharding introduces.
+//! Cluster-equality regression: real shard nodes (gRPC over localhost
+//! TCP) behind a ShardRouter must return results exactly matching an
+//! independent single-node Store holding the same data — the oracle
+//! discipline of oracle_test.rs extended across the network boundary
+//! sharding introduces.
 
 use openraft::{BasicNode, Config};
 use raftvec_aggregator::router::ShardRouter;
@@ -31,12 +29,10 @@ fn random_vector(rng: &mut StdRng, dim: usize) -> Vec<f32> {
     (0..dim).map(|_| rng.gen_range(-1.0..1.0)).collect()
 }
 
-/// Starts one real shard node (gRPC server over localhost TCP) as a
-/// single-member Raft group of its own, and returns its address. A lone
-/// node in a 1-node group elects itself leader immediately, so this is
-/// enough to exercise the real NodeService write/read path (M3) while
-/// keeping this test's actual subject -- the aggregator's fan-out/merge --
-/// unchanged from M2. Binding "127.0.0.1:0" avoids fixed-port collisions.
+/// Starts one real shard node as a single-member Raft group (it elects
+/// itself immediately) — enough to exercise the real write/read path
+/// while keeping the test's subject the aggregator's fan-out/merge.
+/// Binding "127.0.0.1:0" avoids fixed-port collisions.
 async fn spawn_shard_node(node_id: NodeId) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

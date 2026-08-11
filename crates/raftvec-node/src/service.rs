@@ -12,12 +12,10 @@ use raftvec_proto::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-/// One replica of one shard's Raft group. `store` is applied to only via
-/// committed Raft log entries for vector mutations (`insert`/`delete` go
-/// through `raft.client_write`); `create_collection`/`cluster_status`/reads
-/// touch it directly, since collection creation is out-of-band (not
-/// Raft-replicated, see raft.rs's `ShardCommand` doc comment) and reads are
-/// served only when this replica believes itself to be the current leader.
+/// One replica of one shard's Raft group. Vector mutations reach `store`
+/// only via committed Raft log entries (`raft.client_write`); collection
+/// creation is applied out-of-band on every replica, and reads are served
+/// only after confirming leadership with a quorum.
 pub struct NodeService {
     store: Arc<Store>,
     raft: Raft,
@@ -35,9 +33,8 @@ impl NodeService {
         Self { store, raft, node_id }
     }
 
-    /// Leader address resolved from openraft's own live membership metrics
-    /// -- not a separately-maintained map, so it can never drift from what
-    /// the Raft core itself believes.
+    /// Leader address resolved from openraft's own membership metrics, so
+    /// it cannot drift from what the Raft core believes.
     async fn leadership(&self) -> Leadership {
         let metrics = self.raft.metrics().borrow().clone();
         match metrics.current_leader {
@@ -159,6 +156,16 @@ impl RaftVec for NodeService {
                 return Err(Status::unavailable("no leader currently known for this shard"));
             }
             Leadership::IAmLeader => {}
+        }
+
+        // `leadership()` is only this replica's cached belief — an isolated
+        // ex-leader keeps believing it leads and would serve stale reads.
+        // ensure_linearizable() is a ReadIndex-style check that succeeds
+        // only if a majority still acknowledges this replica as leader.
+        if let Err(e) = self.raft.ensure_linearizable().await {
+            return Err(Status::unavailable(format!(
+                "cannot confirm current leadership (lost quorum?): {e}"
+            )));
         }
 
         let req = request.into_inner();

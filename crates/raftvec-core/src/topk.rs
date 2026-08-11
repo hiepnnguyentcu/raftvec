@@ -2,35 +2,65 @@ use crate::record::ScoredId;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-/// Bounded min-heap top-k: keeps only the k best-scoring items seen so far,
-/// evicting the current worst whenever a better one arrives. O(n log k)
-/// instead of sorting all n candidates.
-pub fn bounded_top_k<I: IntoIterator<Item = ScoredId>>(items: I, k: usize) -> Vec<ScoredId> {
-    if k == 0 {
-        return Vec::new();
+/// A bounded min-heap holding the k best-scoring items seen so far. The
+/// heap root is the current worst of the k, so a new item either beats it
+/// (evict + push) or is discarded in O(1).
+pub struct TopK {
+    heap: BinaryHeap<Reverse<ScoredId>>,
+    k: usize,
+}
+
+impl TopK {
+    pub fn new(k: usize) -> Self {
+        Self {
+            heap: BinaryHeap::with_capacity(k),
+            k,
+        }
     }
 
-    let mut heap: BinaryHeap<Reverse<ScoredId>> = BinaryHeap::with_capacity(k);
-    for item in items {
-        if heap.len() < k {
-            heap.push(Reverse(item));
-        } else if let Some(Reverse(worst)) = heap.peek() {
+    #[inline]
+    pub fn push(&mut self, item: ScoredId) {
+        if self.k == 0 {
+            return;
+        }
+        if self.heap.len() < self.k {
+            self.heap.push(Reverse(item));
+        } else if let Some(Reverse(worst)) = self.heap.peek() {
             if item > *worst {
-                heap.pop();
-                heap.push(Reverse(item));
+                self.heap.pop();
+                self.heap.push(Reverse(item));
             }
         }
     }
 
-    let mut result: Vec<ScoredId> = heap.into_iter().map(|Reverse(x)| x).collect();
-    result.sort_by(|a, b| b.cmp(a)); // best first
-    result
+    /// Merges another TopK into this one.
+    pub fn merge(mut self, other: TopK) -> Self {
+        for Reverse(item) in other.heap {
+            self.push(item);
+        }
+        self
+    }
+
+    /// Consumes the heap, returning the top-k sorted best-first.
+    pub fn into_sorted_vec(self) -> Vec<ScoredId> {
+        let mut result: Vec<ScoredId> = self.heap.into_iter().map(|Reverse(x)| x).collect();
+        result.sort_by(|a, b| b.cmp(a));
+        result
+    }
 }
 
-/// Merges several already-sorted (best-first) local top-k lists into one
-/// global top-k. Exact, not approximate: since each input list is a shard's
-/// true local top-k over a disjoint partition of the corpus, the global
-/// top-k must be a subset of their union (see technical design §5.2).
+/// Exact top-k over an iterator: O(n log k), no O(n) intermediate storage.
+pub fn bounded_top_k<I: IntoIterator<Item = ScoredId>>(items: I, k: usize) -> Vec<ScoredId> {
+    let mut topk = TopK::new(k);
+    for item in items {
+        topk.push(item);
+    }
+    topk.into_sorted_vec()
+}
+
+/// Merges per-shard local top-k lists into one global top-k. Exact, not
+/// approximate: shards partition the corpus disjointly, so the global
+/// top-k is necessarily a subset of the union of the local top-k sets.
 pub fn merge_top_k(lists: impl IntoIterator<Item = Vec<ScoredId>>, k: usize) -> Vec<ScoredId> {
     let merged = lists.into_iter().flatten();
     bounded_top_k(merged, k)

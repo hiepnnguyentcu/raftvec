@@ -1,10 +1,9 @@
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
 
-/// shard_id = fxhash(vector_id) % shard_count, fixed at collection creation
-/// (technical design §3). Static hashing is sufficient because shard count
-/// doesn't change at runtime in v1 (dynamic resharding is a documented
-/// non-goal).
+/// shard_id = fxhash(vector_id) % shard_count, fixed at collection
+/// creation. Static hashing suffices because shard count never changes at
+/// runtime (dynamic resharding is a documented non-goal).
 pub fn shard_id(vector_id: u64, shard_count: u32) -> u32 {
     assert!(shard_count > 0, "shard_count must be > 0");
     let mut hasher = FxHasher::default();

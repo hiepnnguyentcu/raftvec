@@ -1,4 +1,4 @@
-use raftvec_core::{brute_force_top_k, shard_id, ScoredId, VectorRecord};
+use raftvec_core::{brute_force_top_k, norm_sq, shard_id, ScoredId, VectorRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -14,15 +14,19 @@ pub enum StoreError {
     DimensionMismatch { expected: usize, actual: usize },
 }
 
-/// One collection's data. In M1 this is the whole store; from M3 onward the
-/// per-shard slice of this same shape becomes the Raft state machine that
-/// `apply()` mutates (technical design §3, §6) — the map is deliberately
-/// kept as the same flat `HashMap<u64, VectorRecord>` shape now so that
-/// migration doesn't change the data model, only who calls insert/delete.
+/// A record plus its squared L2 norm, cached at insert so the scan pays
+/// one accumulation per element (the dot product) instead of three.
+struct StoredVector {
+    record: VectorRecord,
+    norm_sq: f32,
+}
+
+/// One collection's data. This same structure is the Raft state machine's
+/// applied state: committed log entries mutate it via insert/delete.
 struct Collection {
     dim: usize,
     shard_count: u32,
-    vectors: RwLock<HashMap<u64, VectorRecord>>,
+    vectors: RwLock<HashMap<u64, StoredVector>>,
 }
 
 pub struct Store {
@@ -67,14 +71,12 @@ impl Store {
             }
         }
 
-        // M1 has no sharding across nodes, but every id still resolves to a
-        // shard_id via the same hash fn M2 will use for routing — exercised
-        // here so the function is proven correct before it decides routing.
         let mut vectors = coll.vectors.write().unwrap();
         let count = records.len();
-        for r in records {
-            let _ = shard_id(r.id, coll.shard_count);
-            vectors.insert(r.id, r);
+        for record in records {
+            debug_assert!(shard_id(record.id, coll.shard_count) < coll.shard_count);
+            let norm_sq = norm_sq(&record.embedding);
+            vectors.insert(record.id, StoredVector { record, norm_sq });
         }
         Ok(count)
     }
@@ -109,7 +111,8 @@ impl Store {
         }
 
         let vectors = coll.vectors.read().unwrap();
-        let records: Vec<&VectorRecord> = vectors.values().collect();
+        let records: Vec<(&VectorRecord, f32)> =
+            vectors.values().map(|s| (&s.record, s.norm_sq)).collect();
 
         Ok(brute_force_top_k(&records, query, k))
     }
@@ -118,7 +121,7 @@ impl Store {
         let collections = self.collections.read().unwrap();
         let coll = collections.get(collection)?;
         let vectors = coll.vectors.read().unwrap();
-        vectors.get(&id).map(|r| r.metadata.clone())
+        vectors.get(&id).map(|s| s.record.metadata.clone())
     }
 
     pub fn cluster_status(&self) -> (Vec<String>, u32) {
@@ -131,9 +134,8 @@ impl Store {
         (names, total)
     }
 
-    /// Full-store snapshot for Raft's `RaftSnapshotBuilder`/`install_snapshot`
-    /// (technical design §6): a lagging or newly-joined replica catches up
-    /// by installing one of these instead of replaying the whole log.
+    /// Full-store snapshot for Raft snapshot install: a lagging or new
+    /// replica catches up from this instead of replaying the whole log.
     pub fn snapshot(&self) -> StoreSnapshot {
         let collections = self.collections.read().unwrap();
         let snapshot = collections
@@ -144,7 +146,13 @@ impl Store {
                     CollectionSnapshot {
                         dim: coll.dim,
                         shard_count: coll.shard_count,
-                        vectors: coll.vectors.read().unwrap().clone(),
+                        vectors: coll
+                            .vectors
+                            .read()
+                            .unwrap()
+                            .values()
+                            .map(|s| (s.record.id, s.record.clone()))
+                            .collect(),
                     },
                 )
             })
@@ -156,12 +164,22 @@ impl Store {
         let mut collections = self.collections.write().unwrap();
         collections.clear();
         for (name, snap) in snapshot.collections {
+            // Norms are derived state: recomputed on restore rather than
+            // shipped in the snapshot, keeping the wire format minimal.
+            let vectors = snap
+                .vectors
+                .into_values()
+                .map(|record| {
+                    let norm_sq = norm_sq(&record.embedding);
+                    (record.id, StoredVector { record, norm_sq })
+                })
+                .collect();
             collections.insert(
                 name,
                 Collection {
                     dim: snap.dim,
                     shard_count: snap.shard_count,
-                    vectors: RwLock::new(snap.vectors),
+                    vectors: RwLock::new(vectors),
                 },
             );
         }

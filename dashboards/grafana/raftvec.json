@@ -1,0 +1,129 @@
+{
+  "title": "RaftVec",
+  "uid": "raftvec-overview",
+  "tags": ["raftvec"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Query Latency (end-to-end, p50/p99)",
+      "description": "raftvec_query_duration_seconds, aggregator-side. A leader kill shows up here as a transient spike, labeled separately for degraded (shards_failed>0) vs ok results.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_query_duration_seconds{quantile=\"0.5\"}",
+          "legendFormat": "p50 ({{status}})",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_query_duration_seconds{quantile=\"0.99\"}",
+          "legendFormat": "p99 ({{status}})",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Per-Shard Query Latency (p50/p99)",
+      "description": "raftvec_shard_query_duration_seconds -- exposes stragglers in the fan-out.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_shard_query_duration_seconds{quantile=\"0.5\"}",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_shard_query_duration_seconds{quantile=\"0.99\"}",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Raft Leader Elections",
+      "description": "raftvec_raft_leader_elections_total, per replica. Steps visibly at the moment a leader is killed and a new one takes over -- the single most communicative panel on this dashboard during the chaos demo.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_raft_leader_elections_total",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Degraded Results (shards_failed_total)",
+      "description": "raftvec_shards_failed_total -- the key correctness-adjacent metric. Any non-flat line means some query returned an incomplete result.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_shards_failed_total",
+          "legendFormat": "shards_failed",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Replication Lag (entries behind leader)",
+      "description": "raftvec_raft_replication_lag_entries, from each shard's current leader. Only non-zero for a follower that's behind (e.g. one just came back after being killed and is catching up).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_raft_replication_lag_entries",
+          "legendFormat": "follower {{follower_node_id}} ({{instance}})",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Vectors per Replica",
+      "description": "raftvec_vectors_total, by node_id -- shard balance sanity check, and a quick visual confirmation that a recovering replica's count catches back up to its peers.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "raftvec_vectors_total",
+          "legendFormat": "node {{node_id}} ({{instance}})",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -27,35 +27,46 @@ pub enum RouterError {
     ShardUnreachable,
 }
 
-/// One shard's Raft group: all its replicas, plus a cached guess at which
-/// one is currently the leader. There is no MetaRaft (out of scope, see
-/// technical design's non-goals) -- the aggregator's own static config IS
-/// the shard->replica-address topology; only *leadership within* a shard's
-/// fixed replica set is discovered dynamically, via `leader_hint`.
+/// One shard's Raft group: its replicas plus a cached guess at the current
+/// leader. Topology is static config; only leadership within the fixed
+/// replica set is discovered dynamically, via `leader_hint`.
 struct ShardReplicaSet {
     clients: Vec<RaftVecClient<Channel>>,
     addrs: Vec<String>,
-    /// Index into `clients`/`addrs` last known (or guessed) to be leader.
-    /// Relaxed ordering is enough: this is a best-effort cache to avoid
-    /// wasted round trips, not a correctness-load-bearing value -- a stale
-    /// guess just costs one extra retry, never a wrong answer.
+    /// Index of the replica last believed to be leader. Best-effort cache:
+    /// a stale guess costs one extra retry, never a wrong answer.
     leader_hint: AtomicUsize,
 }
 
-/// Stateless routing/fan-out over a fixed set of shards, each a fixed set
-/// of Raft replicas (technical design §2.2, §5.1).
+/// Stateless routing/fan-out over a fixed set of shards, each a fixed
+/// set of Raft replicas.
 pub struct ShardRouter {
     shards: Vec<ShardReplicaSet>,
-    /// Per-shard call deadline for search fan-out (technical design §5.3):
-    /// a slow/dead shard degrades the result instead of hanging the query.
+    /// Per-shard fan-out deadline: a slow or dead shard degrades the
+    /// result (`shards_failed`) instead of hanging the query.
     deadline: Duration,
 }
 
 const CONNECT_MAX_ATTEMPTS: u32 = 10;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// tonic's default 4MiB message cap is too small for batched vector
+/// payloads; mirrors raftvec-node's identical limit on the Raft transport.
+pub const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 /// One attempt per replica plus one extra to follow a hint received on the
 /// last replica tried.
 const MAX_LEADER_ATTEMPTS: usize = 4;
+
+/// Per-attempt read budget inside `call_with_retry` — much smaller than
+/// the fan-out deadline so giving up on one dead replica leaves time to
+/// reach a live one within the same request.
+const READ_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// Writes get a larger budget: a batched insert carries megabytes and
+/// must commit to a Raft majority before acknowledgement. Upserts are
+/// idempotent (keyed by vector id), so a retry after a generous timeout
+/// costs a duplicate round trip, never duplicate data.
+const WRITE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Implemented by every response type that carries a `leader_hint` field
 /// (InsertResponse/DeleteResponse/SearchResponse), so `call_with_retry` can
@@ -140,7 +151,7 @@ impl ShardRouter {
             .map(|(shard, group)| {
                 let collection = collection.to_string();
                 async move {
-                    call_with_retry(shard, move |mut client| {
+                    call_with_retry(shard, WRITE_ATTEMPT_TIMEOUT, move |mut client| {
                         let req = InsertRequest {
                             collection: collection.clone(),
                             records: group.clone(),
@@ -169,7 +180,7 @@ impl ShardRouter {
             .map(|(shard, group)| {
                 let collection = collection.to_string();
                 async move {
-                    call_with_retry(shard, move |mut client| {
+                    call_with_retry(shard, WRITE_ATTEMPT_TIMEOUT, move |mut client| {
                         let req = DeleteRequest {
                             collection: collection.clone(),
                             ids: group.clone(),
@@ -198,9 +209,10 @@ impl ShardRouter {
             let collection = collection.to_string();
             let query_vector = query_vector.clone();
             async move {
-                tokio::time::timeout(
+                let start = std::time::Instant::now();
+                let result = tokio::time::timeout(
                     deadline,
-                    call_with_retry(shard, move |mut client| {
+                    call_with_retry(shard, READ_ATTEMPT_TIMEOUT, move |mut client| {
                         let req = SearchRequest {
                             collection: collection.clone(),
                             query_vector: query_vector.clone(),
@@ -209,7 +221,9 @@ impl ShardRouter {
                         async move { client.search(req).await }
                     }),
                 )
-                .await
+                .await;
+                metrics::histogram!("raftvec_shard_query_duration_seconds").record(start.elapsed().as_secs_f64());
+                result
             }
         });
 
@@ -221,7 +235,10 @@ impl ShardRouter {
         for r in responses {
             match r {
                 Ok(Ok(resp)) => shard_lists.push(resp.results),
-                _ => shards_failed += 1, // timed out finding a leader, or every replica errored
+                _ => {
+                    shards_failed += 1; // timed out finding a leader, or every replica errored
+                    metrics::counter!("raftvec_shards_failed_total").increment(1);
+                }
             }
         }
 
@@ -230,12 +247,10 @@ impl ShardRouter {
     }
 
     pub async fn cluster_status(&self) -> (Vec<String>, u32) {
-        // Any replica's local count is representative enough for this
-        // observability endpoint (technical design §7 FR8) -- no need to
-        // route specifically to leaders here. But it must still try more
-        // than one replica: always querying index 0 silently under-counts
-        // the moment that one replica is down, which is exactly when this
-        // endpoint is most useful.
+        // Any replica's count is representative for this observability
+        // endpoint, but it must fall through to other replicas: always
+        // querying index 0 silently under-counts the moment that replica
+        // is down — exactly when this endpoint matters most.
         let calls = self.shards.iter().map(|shard| async move {
             for mut client in shard.clients.iter().cloned() {
                 if let Ok(resp) = client.cluster_status(ClusterStatusRequest {}).await {
@@ -269,40 +284,64 @@ impl ShardRouter {
     }
 }
 
-/// Calls `make_request` against `shard`'s cached leader guess; if the
-/// replica says it isn't leader (`leader_hint` non-empty in the response)
-/// or is unreachable, follows the hint (or just advances to the next
-/// replica) and retries, up to `MAX_LEADER_ATTEMPTS` times (technical
-/// design §5.1: bounded retry rather than retrying forever).
-async fn call_with_retry<F, Fut, R>(shard: &ShardReplicaSet, mut make_request: F) -> Result<R, RouterError>
+/// Calls `make_request` against the shard's cached leader guess, following
+/// `leader_hint` redirects or advancing to the next replica on failure, up
+/// to `MAX_LEADER_ATTEMPTS` times.
+///
+/// Two invariants are load-bearing (see README, "What real failure
+/// testing caught", #4):
+/// 1. every attempt is individually time-bounded — a call to a killed
+///    replica hangs rather than failing fast, and must not consume the
+///    caller's whole deadline;
+/// 2. the cached hint advances on failure, not just success — otherwise a
+///    cancelled call loses the advancement and every subsequent request
+///    starts back at the same dead replica.
+async fn call_with_retry<F, Fut, R>(
+    shard: &ShardReplicaSet,
+    attempt_timeout: Duration,
+    mut make_request: F,
+) -> Result<R, RouterError>
 where
     F: FnMut(RaftVecClient<Channel>) -> Fut,
     Fut: Future<Output = Result<Response<R>, Status>>,
     R: CarriesLeaderHint,
 {
-    let mut idx = shard.leader_hint.load(Ordering::Relaxed) % shard.clients.len();
+    let replica_count = shard.clients.len();
+    let mut idx = shard.leader_hint.load(Ordering::Relaxed) % replica_count;
     let mut last_err: Option<RouterError> = None;
 
     for _ in 0..MAX_LEADER_ATTEMPTS {
         let client = shard.clients[idx].clone();
-        match make_request(client).await {
-            Ok(response) => {
+        let outcome = tokio::time::timeout(attempt_timeout, make_request(client)).await;
+
+        let next_idx = match outcome {
+            Ok(Ok(response)) => {
                 let response = response.into_inner();
                 if response.leader_hint().is_empty() {
                     shard.leader_hint.store(idx, Ordering::Relaxed);
                     return Ok(response);
                 }
-                idx = shard
+                // Misrouted: the replica told us who the leader is.
+                shard
                     .addrs
                     .iter()
                     .position(|a| a == response.leader_hint())
-                    .unwrap_or((idx + 1) % shard.clients.len());
+                    .unwrap_or((idx + 1) % replica_count)
             }
-            Err(status) => {
+            Ok(Err(status)) => {
                 last_err = Some(RouterError::Rpc(status));
-                idx = (idx + 1) % shard.clients.len();
+                (idx + 1) % replica_count
             }
-        }
+            Err(_elapsed) => {
+                last_err = Some(RouterError::ShardUnreachable);
+                (idx + 1) % replica_count
+            }
+        };
+
+        idx = next_idx;
+        // Persist eagerly so a cancelled call still leaves the cache
+        // pointing somewhere better than the replica we just gave up on.
+        shard.leader_hint.store(idx, Ordering::Relaxed);
     }
 
     Err(last_err.unwrap_or(RouterError::ShardUnreachable))
@@ -312,7 +351,11 @@ async fn connect_with_retry(addr: &str) -> Result<RaftVecClient<Channel>, Router
     let mut last_err = None;
     for attempt in 0..CONNECT_MAX_ATTEMPTS {
         match RaftVecClient::connect(addr.to_string()).await {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                return Ok(client
+                    .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                    .max_encoding_message_size(MAX_MESSAGE_SIZE))
+            }
             Err(e) => {
                 last_err = Some(e);
                 if attempt + 1 < CONNECT_MAX_ATTEMPTS {

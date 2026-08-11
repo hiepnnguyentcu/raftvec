@@ -1,14 +1,8 @@
-//! openraft integration for a single shard's Raft group (technical design
-//! §6). Every replica of a shard runs one of these; `ShardStateMachine`
-//! wraps the same `Store` the M1/M2 gRPC service reads/writes, so a
-//! committed log entry and a direct local read see identical data.
-//!
-//! Log storage and network trait shapes are adapted from the openraft
-//! project's own reference example (examples/memstore,
-//! examples/raft-kv-memstore at v0.9.25) -- verified first in isolation in
-//! `crates/raft-spike` before being pointed at real `VectorRecord` data
-//! here. `RaftNetwork` here is still a loopback (test-only); real gRPC
-//! transport between replicas is the next step.
+//! openraft integration for a single shard's Raft group. Every replica
+//! runs one of these; `ShardStateMachine` wraps the same `Store` the gRPC
+//! service reads, so a committed log entry and a local read see identical
+//! data. Storage trait shapes follow openraft's reference memstore
+//! example (v0.9).
 
 use crate::store::Store;
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine, Snapshot};
@@ -34,17 +28,11 @@ openraft::declare_raft_types!(
 
 pub type Raft = openraft::Raft<TypeConfig>;
 
-/// The unit of replication for a shard's Raft log (technical design §6).
-/// Carries its own `collection` name because a single shard-replica
-/// process hosts the same multi-collection `Store` the M1/M2 gRPC path
-/// does; only vector mutations are Raft-replicated -- `CreateCollection`
-/// stays an out-of-band call applied identically to every replica (M2
-/// pattern), since it is rare and not the property FR5 is about.
-///
-/// Carries a whole batch rather than one record/id, so a single (batched)
-/// gRPC Insert/Delete call becomes exactly one Raft log entry -- proposing
-/// one entry per record in a 1000-record batch would multiply both the
-/// replication round trips and the log size for no benefit.
+/// The unit of replication for a shard's Raft log. Carries a whole batch
+/// so one gRPC Insert/Delete becomes exactly one log entry; carries the
+/// collection name because a replica hosts a multi-collection `Store`.
+/// Only vector mutations are replicated — `CreateCollection` is applied
+/// out-of-band on every replica.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ShardCommand {
     Upsert { collection: String, records: Vec<VectorRecord> },
@@ -56,10 +44,7 @@ pub struct ShardCommandResponse {
     pub applied_count: u32,
 }
 
-// ---------------------------------------------------------------------
-// Log storage: in-memory (documented non-goal: no disk persistence,
-// product spec §5). Shape verified in crates/raft-spike.
-// ---------------------------------------------------------------------
+// In-memory log storage (no disk persistence — documented non-goal).
 
 #[derive(Clone, Default)]
 pub struct LogStore {
@@ -178,7 +163,7 @@ impl ShardStateMachine {
 impl RaftSnapshotBuilder<TypeConfig> for Arc<ShardStateMachine> {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
         let bytes =
-            serde_json::to_vec(&self.store.snapshot()).map_err(|e| StorageIOError::read_state_machine(&e))?;
+            bincode::serialize(&self.store.snapshot()).map_err(|e| StorageIOError::read_state_machine(&e))?;
         let last_applied_log = *self.last_applied_log.read().await;
         let last_membership = self.last_membership.read().await.clone();
         let meta = SnapshotMeta {
@@ -216,11 +201,9 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
             match entry.payload {
                 EntryPayload::Blank => res.push(ShardCommandResponse { applied_count: 0 }),
                 EntryPayload::Normal(cmd) => {
-                    // A rejection here (unknown collection, dim mismatch) is
-                    // an application-level outcome, not a storage failure --
-                    // every replica applies the same committed entry and
-                    // must reach the same (non-fatal) outcome deterministically,
-                    // rather than erroring the whole apply() call.
+                    // A rejection (unknown collection, dim mismatch) is an
+                    // application-level outcome every replica reaches
+                    // deterministically, not a storage failure.
                     let applied_count = match cmd {
                         ShardCommand::Upsert { collection, records } => {
                             self.store.insert(&collection, records).unwrap_or(0) as u32
@@ -252,7 +235,7 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
         snapshot: Box<<TypeConfig as RaftTypeConfig>::SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
         let bytes = snapshot.into_inner();
-        let store_snapshot = serde_json::from_slice(&bytes)
+        let store_snapshot = bincode::deserialize(&bytes)
             .map_err(|e| StorageIOError::read_snapshot(Some(meta.signature()), &e))?;
         self.store.restore(store_snapshot);
         *self.last_applied_log.write().await = meta.last_log_id;
@@ -261,9 +244,8 @@ impl RaftStateMachine<TypeConfig> for Arc<ShardStateMachine> {
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        // No persisted snapshot cache: `build_snapshot` re-serializes the
-        // live Store on demand, which is cheap enough at this project's
-        // scale and avoids tracking a second copy of the data in sync.
+        // No snapshot cache: `build_snapshot` re-serializes the live Store
+        // on demand rather than keeping a second copy in sync.
         Ok(None)
     }
 

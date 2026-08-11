@@ -1,0 +1,25 @@
+# Scrape config for the RaftVec cluster (technical design §10).
+# Every shard replica and the aggregator expose Prometheus metrics on
+# their own --metrics-listen port, distinct from their gRPC port.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: raftvec-shards
+    static_configs:
+      - targets:
+          - shard0-r1:9100
+          - shard0-r2:9100
+          - shard0-r3:9100
+          - shard1-r1:9100
+          - shard1-r2:9100
+          - shard1-r3:9100
+        labels:
+          component: shard-replica
+
+  - job_name: raftvec-aggregator
+    static_configs:
+      - targets:
+          - aggregator:9101
+        labels:
+          component: aggregator

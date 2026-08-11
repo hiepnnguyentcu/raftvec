@@ -1,11 +1,7 @@
-//! Open-loop load generator (product spec §9, M2): fires Search requests at
-//! a fixed target rate for a fixed duration over one persistent connection,
-//! and reports achieved QPS + latency percentiles + error count. "Open-loop"
-//! means requests are scheduled at the target rate regardless of whether
-//! prior requests have finished -- that's what actually exposes latency
-//! blowing up under load, vs. a closed-loop client that waits for each
-//! response before sending the next (which self-throttles and can hide
-//! degradation).
+//! Open-loop load generator: fires Search requests at a fixed target rate
+//! and reports achieved QPS, latency percentiles, and error count.
+//! Open-loop (scheduling regardless of in-flight requests) is what exposes
+//! latency degradation; a closed-loop client self-throttles and hides it.
 //!
 //! Usage: bench --addr http://127.0.0.1:50060 --dim 384 --qps 200 --duration-secs 60
 
@@ -69,7 +65,11 @@ async fn main() -> anyhow::Result<()> {
     // One real connection, cloned per request (cheap -- shares the
     // underlying HTTP/2 channel). Reconnecting per-request would measure
     // handshake overhead, not query latency.
-    let base_client = RaftVecClient::connect(args.addr.clone()).await?;
+    const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024; // see raftvec-node's MAX_MESSAGE_SIZE
+    let base_client = RaftVecClient::connect(args.addr.clone())
+        .await?
+        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
     let results = Arc::new(Results::default());
     let period = Duration::from_secs_f64(1.0 / args.qps as f64);

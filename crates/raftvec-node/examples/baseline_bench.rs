@@ -1,9 +1,6 @@
-//! M1 baseline latency measurement (product spec §9 exit criteria: "latency
-//! measured and recorded as the baseline"). Measures brute-force search
-//! latency in-process against a synthetic 500K-vector, 384-dim collection
-//! (matching the corpus size/dim named in the spec's demo scenario) so the
-//! number reflects the search algorithm itself, not gRPC/network overhead.
-//! M2's sharded cluster and M3's degraded cluster are compared against this.
+//! Single-node scan latency baseline: brute-force search measured
+//! in-process against a synthetic 500K-vector, 384-dim collection, so the
+//! number reflects the scan itself rather than gRPC/network overhead.
 //!
 //! Run: cargo run --release -p raftvec-node --example baseline_bench
 
@@ -66,6 +63,6 @@ fn main() {
     let p99 = percentile(&latencies_ms, 0.99);
     let mean: f64 = latencies_ms.iter().sum::<f64>() / latencies_ms.len() as f64;
 
-    println!("\n--- M1 single-node baseline ({N} vectors, dim={DIM}, k={K}, {QUERIES} queries) ---");
+    println!("\n--- single-node scan baseline ({N} vectors, dim={DIM}, k={K}, {QUERIES} queries) ---");
     println!("mean: {mean:.2}ms  p50: {p50:.2}ms  p99: {p99:.2}ms");
 }

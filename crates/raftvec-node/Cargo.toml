@@ -24,6 +24,9 @@ tracing-subscriber = { workspace = true }
 openraft = { version = "0.9.25", features = ["serde", "storage-v2"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
+metrics = "0.24.6"
+metrics-exporter-prometheus = "0.18.3"
+bincode = "1"
 
 [dev-dependencies]
 rand = "0.8"

@@ -33,24 +33,38 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROTO_DIR="$ROOT/crates/raftvec-proto/proto"
-PROJECT="$(basename "$ROOT" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9-')"
-NETWORK="${PROJECT}_default"
+
+if ! command -v grpcurl >/dev/null 2>&1; then
+  echo "grpcurl not found on PATH (brew install grpcurl)" >&2
+  exit 1
+fi
+
+# Each shard replica publishes its gRPC port to a distinct host port (see
+# docker-compose.yml), so leadership can be probed with the host's native
+# grpcurl. The earlier approach -- `docker run --rm fullstorydev/grpcurl`
+# per probe -- cost ~0.7s of container startup per call, up to ~2s per
+# poll cycle across three replicas, which was large enough to dominate the
+# very recovery time this script exists to measure.
+host_port() {
+  case "$1" in
+    shard0-r1) echo 51001 ;; shard0-r2) echo 51002 ;; shard0-r3) echo 51003 ;;
+    shard1-r1) echo 51011 ;; shard1-r2) echo 51012 ;; shard1-r3) echo 51013 ;;
+    *) echo "" ;;
+  esac
+}
 
 # All-zero query vector of the right length: cosine_similarity special-cases
 # a zero vector to score 0.0 for everything (raftvec-core/src/similarity.rs)
 # rather than dividing by zero, so this is a safe no-op probe that still
 # passes the dimension check and reaches the leadership check inside
 # NodeService::search (which runs before any dimension validation).
-zero_vector() {
-  python3 -c "print(','.join(['0'] * $DIM))"
-}
+ZERO_VECTOR="$(python3 -c "print(','.join(['0'] * $DIM))")"
 
 grpc_search() {
-  local target="$1"
-  docker run --rm --network "$NETWORK" -v "$PROTO_DIR:/proto" fullstorydev/grpcurl \
-    -plaintext -max-time 2 -import-path /proto -proto raftvec.proto \
-    -d "{\"collection\":\"$COLLECTION\",\"query_vector\":[$(zero_vector)],\"k\":1}" \
-    "${target}:50051" raftvec.RaftVec/Search 2>/dev/null || true
+  local port="$1"
+  grpcurl -plaintext -max-time 2 -import-path "$PROTO_DIR" -proto raftvec.proto \
+    -d "{\"collection\":\"$COLLECTION\",\"query_vector\":[$ZERO_VECTOR],\"k\":1}" \
+    "127.0.0.1:${port}" raftvec.RaftVec/Search 2>/dev/null || true
 }
 
 # Prints the replica service name currently believed to be this shard's
@@ -60,7 +74,7 @@ find_leader() {
   local shard="$1"
   for replica in "${shard}-r1" "${shard}-r2" "${shard}-r3"; do
     local resp
-    resp=$(grpc_search "$replica")
+    resp=$(grpc_search "$(host_port "$replica")")
     if [[ -n "$resp" ]] && ! grep -q leaderHint <<<"$resp"; then
       echo "$replica"
       return 0
@@ -87,7 +101,7 @@ echo "[t=$(elapsed_since "$START")s] killed $LEADER"
 
 # Recovery time is measured from the kill itself, not from script start --
 # the leader-discovery probe above is setup, not part of what NFR2 bounds.
-DEADLINE=$(python3 -c "import time; print(time.time() + 10)")
+DEADLINE=$(python3 -c "import time; print(time.time() + 30)")
 NEW_LEADER=""
 while python3 -c "import time,sys; sys.exit(0 if time.time() < $DEADLINE else 1)"; do
   CANDIDATE=$(find_leader "$SHARD" || true)

@@ -1,8 +1,10 @@
 use anyhow::Context;
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use openraft::{BasicNode, Config};
+use raftvec_node::metrics::{spawn_leader_election_watcher, spawn_replication_lag_gauge, spawn_vector_count_gauge};
 use raftvec_node::raft::{LogStore, NodeId, ShardStateMachine};
-use raftvec_node::raft_network::{GrpcNetwork, ShardRaftService};
+use raftvec_node::raft_network::{GrpcNetwork, ShardRaftService, MAX_MESSAGE_SIZE};
 use raftvec_node::service::NodeService;
 use raftvec_node::store::Store;
 use raftvec_proto::raft_vec_server::RaftVecServer;
@@ -40,6 +42,10 @@ struct Args {
     /// on an already-initialized cluster it's a harmless no-op error.
     #[arg(long, default_value_t = false)]
     bootstrap: bool,
+
+    /// Address the Prometheus /metrics endpoint is served on.
+    #[arg(long, default_value = "0.0.0.0:9100")]
+    metrics_listen: SocketAddr,
 }
 
 fn normalize(addr: &str) -> String {
@@ -69,14 +75,24 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let members = parse_peers(&args.peers)?;
 
-    // Election timeout 150-300ms, heartbeat 50ms (technical design §6):
-    // tuned to meet NFR2 (<2s recovery) with headroom for aggregator
-    // retry and cache refresh on top of the election itself.
+    PrometheusBuilder::new()
+        .with_http_listener(args.metrics_listen)
+        .install()
+        .context("installing Prometheus exporter")?;
+    tracing::info!(addr = %args.metrics_listen, "serving /metrics");
+
+    // openraft uses `heartbeat_interval` as the AppendEntries RPC timeout,
+    // and AppendEntries carries replicated payload (a catch-up batch can be
+    // tens of MB) — so it must cover realistic transfer time, not just
+    // round-trip latency. Widening `election_timeout_max` costs recovery
+    // twice: failure detection, then the leader lease openraft ties to the
+    // same bound. Values are from measured behavior under Docker
+    // networking; see README "Known limitations".
     let config = Arc::new(
         Config {
-            heartbeat_interval: 50,
-            election_timeout_min: 150,
-            election_timeout_max: 300,
+            heartbeat_interval: 250,
+            election_timeout_min: 750,
+            election_timeout_max: 1500,
             ..Default::default()
         }
         .validate()?,
@@ -88,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
     let network = GrpcNetwork::default();
 
     let raft = openraft::Raft::new(args.node_id, config, network, log_store, state_machine).await?;
+
+    spawn_leader_election_watcher(raft.clone());
+    spawn_replication_lag_gauge(raft.clone());
+    spawn_vector_count_gauge(store.clone(), args.node_id);
 
     if args.bootstrap {
         let raft = raft.clone();
@@ -107,8 +127,16 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %args.listen, node_id = args.node_id, "raftvec-node listening");
 
     Server::builder()
-        .add_service(RaftVecServer::new(node_service))
-        .add_service(ShardRaftServer::new(raft_service))
+        .add_service(
+            RaftVecServer::new(node_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE),
+        )
+        .add_service(
+            ShardRaftServer::new(raft_service)
+                .max_decoding_message_size(MAX_MESSAGE_SIZE)
+                .max_encoding_message_size(MAX_MESSAGE_SIZE),
+        )
         .serve(args.listen)
         .await?;
 

@@ -7,10 +7,9 @@ use raftvec_proto::{
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-/// Implements the exact same client-facing RaftVec service raftvec-node
-/// does (M1), but every method delegates to the ShardRouter instead of a
-/// local Store. This is what lets vecctl point at either a standalone node
-/// or this aggregator with zero client-side changes.
+/// Implements the same client-facing RaftVec service raftvec-node does,
+/// delegating to the ShardRouter instead of a local store — vecctl can
+/// point at either without client-side changes.
 pub struct AggregatorService {
     router: Arc<ShardRouter>,
 }
@@ -44,11 +43,9 @@ impl RaftVec for AggregatorService {
 
     async fn insert(&self, request: Request<InsertRequest>) -> Result<Response<InsertResponse>, Status> {
         let req = request.into_inner();
+        // The router resolves leadership internally, so there is nothing
+        // to hint the aggregator's own caller about.
         let inserted = self.router.insert(&req.collection, req.records).await?;
-        // The router already resolved leadership internally (retrying
-        // against each shard's current leader) -- by the time we get an
-        // Ok here there's nothing left to hint the aggregator's own caller
-        // about.
         Ok(Response::new(InsertResponse {
             inserted,
             leader_hint: String::new(),
@@ -65,11 +62,18 @@ impl RaftVec for AggregatorService {
     }
 
     async fn search(&self, request: Request<SearchRequest>) -> Result<Response<SearchResponse>, Status> {
+        let start = std::time::Instant::now();
         let req = request.into_inner();
         let (results, shards_queried, shards_failed) = self
             .router
             .search(&req.collection, req.query_vector, req.k)
             .await;
+
+        // Labeled by result status so degraded windows are visible as
+        // their own series rather than averaged into steady-state latency.
+        let status = if shards_failed > 0 { "degraded" } else { "ok" };
+        metrics::histogram!("raftvec_query_duration_seconds", "status" => status)
+            .record(start.elapsed().as_secs_f64());
 
         Ok(Response::new(SearchResponse {
             results,

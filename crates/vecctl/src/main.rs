@@ -82,9 +82,13 @@ struct JsonlRecord {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // tonic's default 4MiB message cap is too small for batched inserts.
+    const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
     let mut client = RaftVecClient::connect(cli.addr.clone())
         .await
-        .with_context(|| format!("connecting to {}", cli.addr))?;
+        .with_context(|| format!("connecting to {}", cli.addr))?
+        .max_decoding_message_size(MAX_MESSAGE_SIZE)
+        .max_encoding_message_size(MAX_MESSAGE_SIZE);
 
     match cli.command {
         Cmd::CreateCollection {

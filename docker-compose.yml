@@ -1,23 +1,20 @@
-# RaftVec cluster (M3): 2 shards, each a 3-node Raft group -- 6 shard
-# replicas + 1 aggregator. Fixed at 2 shards x 3 replicas rather than 4x3
-# (product spec §10 risk register: "12 containers overwhelm a laptop" ->
-# "reduce to 2 shards x 3 replicas; the thesis holds identically").
+# RaftVec cluster: 2 shards x 3 Raft replicas + aggregator + Prometheus +
+# Grafana.
 #
 #   docker compose up -d --build
 #   docker compose run --rm vecctl --addr http://aggregator:50060 \
 #       create-collection --collection docs --dim 384 --shard-count 2
-#   docker compose run --rm vecctl --addr http://aggregator:50060 \
-#       search --collection docs --query-vector 0.1,0.2,... -k 5
 #
-#   ./chaos/chaos.sh   -- kills a shard leader mid-load-test
-#   ./chaos/audit.sh   -- verifies no lost/duplicated writes post-chaos
+#   ./chaos/chaos.sh --kill-leader shard0   # kill a shard leader
+#   ./chaos/audit.sh --file corpus.jsonl    # verify nothing was lost
 #
-# Every node binds 0.0.0.0 inside its container (not the CLI's default
-# 127.0.0.1) so peers and the aggregator, on different containers, can
-# reach it over the compose network by service name. Only shard0-r1 and
-# shard1-r1 pass --bootstrap: exactly one replica per shard proposes the
-# initial membership config (technical design §6); the other two join as
-# already-listed members once that succeeds.
+#   Grafana:    http://localhost:3000  (anonymous, dashboard auto-loaded)
+#   Prometheus: http://localhost:9090
+#
+# Shard replica gRPC ports are published to distinct host ports (5100x /
+# 5101x) so the chaos scripts can probe leadership from the host. Exactly
+# one replica per shard passes --bootstrap to propose the initial
+# membership config.
 services:
   shard0-r1:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -29,7 +26,11 @@ services:
       - "--bootstrap"
       - "--peers"
       - "1=shard0-r1:50051,2=shard0-r2:50051,3=shard0-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51001:50051"
+    expose: ["9100"]
 
   shard0-r2:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -40,7 +41,11 @@ services:
       - "2"
       - "--peers"
       - "1=shard0-r1:50051,2=shard0-r2:50051,3=shard0-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51002:50051"
+    expose: ["9100"]
 
   shard0-r3:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -51,7 +56,11 @@ services:
       - "3"
       - "--peers"
       - "1=shard0-r1:50051,2=shard0-r2:50051,3=shard0-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51003:50051"
+    expose: ["9100"]
 
   shard1-r1:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -63,7 +72,11 @@ services:
       - "--bootstrap"
       - "--peers"
       - "1=shard1-r1:50051,2=shard1-r2:50051,3=shard1-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51011:50051"
+    expose: ["9100"]
 
   shard1-r2:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -74,7 +87,11 @@ services:
       - "2"
       - "--peers"
       - "1=shard1-r1:50051,2=shard1-r2:50051,3=shard1-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51012:50051"
+    expose: ["9100"]
 
   shard1-r3:
     build: { context: ., dockerfile: Dockerfile, target: node }
@@ -85,7 +102,11 @@ services:
       - "3"
       - "--peers"
       - "1=shard1-r1:50051,2=shard1-r2:50051,3=shard1-r3:50051"
-    expose: ["50051"]
+      - "--metrics-listen"
+      - "0.0.0.0:9100"
+    ports:
+      - "51013:50051"
+    expose: ["9100"]
 
   aggregator:
     build: { context: ., dockerfile: Dockerfile, target: aggregator }
@@ -96,8 +117,11 @@ services:
       - "shard0-r1:50051,shard0-r2:50051,shard0-r3:50051"
       - "--shard"
       - "shard1-r1:50051,shard1-r2:50051,shard1-r3:50051"
+      - "--metrics-listen"
+      - "0.0.0.0:9101"
     ports:
       - "50060:50060"
+    expose: ["9101"]
     depends_on:
       - shard0-r1
       - shard0-r2
@@ -105,6 +129,28 @@ services:
       - shard1-r1
       - shard1-r2
       - shard1-r3
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ./dashboards/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - aggregator
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Editor
+    volumes:
+      - ./dashboards/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards/grafana/raftvec.json:/var/lib/grafana/dashboards/raftvec.json:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
 
   # Not started by default (`docker compose up` skips profiled services).
   # Run one-off CLI commands against the cluster with:

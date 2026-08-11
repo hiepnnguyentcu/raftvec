@@ -1,16 +1,10 @@
-//! Real gRPC transport for a shard's Raft group, replacing the in-process
-//! loopback used in raft.rs's own tests. Two halves of one wire contract:
-//! `GrpcNetwork`/`GrpcConnection` (client side, implements openraft's
-//! `RaftNetworkFactory`/`RaftNetwork`) and `ShardRaftService` (server side,
-//! implements the generated `ShardRaft` gRPC trait and hands incoming
-//! requests to this node's local `Raft` handle).
+//! gRPC transport for a shard's Raft group: `GrpcNetwork`/`GrpcConnection`
+//! implement openraft's client-side network traits; `ShardRaftService`
+//! serves the receiving end and hands requests to the local `Raft` handle.
 //!
-//! openraft's request/response types are generic Rust structs whose exact
-//! shape can shift across versions; rather than hand-modeling every field
-//! as its own proto message, each RPC carries the request/response
-//! (including the `Result<_, RaftError<..>>` on responses) JSON-encoded as
-//! opaque bytes (technical design §4.2's transport RPCs, `raftvec.proto`'s
-//! `RaftMessage`).
+//! openraft's request/response types are version-sensitive generics, so
+//! rather than hand-modeling them as proto messages, each RPC carries the
+//! bincode-serialized request/response as opaque bytes (`RaftMessage`).
 
 use crate::raft::{NodeId, Raft, TypeConfig};
 use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError, Unreachable};
@@ -27,33 +21,59 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
 
 // ---------------------------------------------------------------------
 // Client side: RaftNetworkFactory / RaftNetwork over tonic.
 // ---------------------------------------------------------------------
 
+/// Connect timeout per peer. A healthy same-network peer connects in
+/// single-digit milliseconds; this bound only matters for dead peers,
+/// where every election round otherwise burns the full budget waiting on
+/// a member that will never answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// tonic's default 4MiB message cap is too small for AppendEntries
+/// carrying batched vector payloads (a catch-up batch can reach tens of
+/// MB); hitting it makes replication to a healthy follower fail in a way
+/// that is indistinguishable from a stuck election.
+pub const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+
 #[derive(Clone, Default)]
 pub struct GrpcNetwork {
-    /// Connections are cached per target node id and reused across RPCs
-    /// (a fresh TCP + HTTP/2 handshake per heartbeat would dominate
-    /// latency and defeat the point of a 50-150ms election timeout).
+    /// Connections cached per target node and reused across RPCs; a fresh
+    /// TCP + HTTP/2 handshake per heartbeat would dominate latency.
     clients: Arc<Mutex<HashMap<NodeId, ShardRaftClient<Channel>>>>,
 }
 
 impl GrpcNetwork {
+    /// The lock covers only the cache lookup/insert, never the
+    /// `.connect().await` itself — otherwise one slow connect to a dead
+    /// peer serializes connects to healthy peers behind it.
     async fn get_or_connect(
         &self,
         target: NodeId,
         addr: &str,
     ) -> Result<ShardRaftClient<Channel>, tonic::transport::Error> {
-        let mut clients = self.clients.lock().await;
-        if let Some(client) = clients.get(&target) {
-            return Ok(client.clone());
+        {
+            let clients = self.clients.lock().await;
+            if let Some(client) = clients.get(&target) {
+                return Ok(client.clone());
+            }
         }
-        let client = ShardRaftClient::connect(addr.to_string()).await?;
+
+        let channel = Endpoint::from_shared(addr.to_string())?
+            .connect_timeout(CONNECT_TIMEOUT)
+            .connect()
+            .await?;
+        let client = ShardRaftClient::new(channel)
+            .max_decoding_message_size(MAX_MESSAGE_SIZE)
+            .max_encoding_message_size(MAX_MESSAGE_SIZE);
+
+        let mut clients = self.clients.lock().await;
         clients.insert(target, client.clone());
         Ok(client)
     }
@@ -84,10 +104,9 @@ enum RaftRpc {
 }
 
 impl GrpcConnection {
-    /// Sends `req`, expecting the peer to respond with a JSON-encoded
-    /// `Result<Resp, RaftError<NodeId, E>>` -- i.e. the exact `Result` its
-    /// own local `raft.append_entries()`/`vote()`/`install_snapshot()edge`
-    /// call produced, relayed byte-for-byte rather than reconstructed.
+    /// Sends `req`; the peer replies with the serialized
+    /// `Result<Resp, RaftError<..>>` its local Raft call produced, relayed
+    /// byte-for-byte rather than reconstructed.
     async fn call<Req, Resp, E>(
         &mut self,
         rpc: RaftRpc,
@@ -98,7 +117,7 @@ impl GrpcConnection {
         Resp: DeserializeOwned,
         E: std::error::Error + DeserializeOwned,
     {
-        let payload = serde_json::to_vec(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let payload = bincode::serialize(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
 
         let mut client = self
             .network
@@ -123,7 +142,7 @@ impl GrpcConnection {
 
         let bytes = response.into_inner().payload;
         let result: Result<Resp, RaftError<NodeId, E>> =
-            serde_json::from_slice(&bytes).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+            bincode::deserialize(&bytes).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
 
         result.map_err(|e| RPCError::RemoteError(RemoteError::new(self.target, e)))
     }
@@ -173,13 +192,13 @@ impl ShardRaftService {
 
 #[allow(clippy::result_large_err)]
 fn encode<T: Serialize>(result: &T) -> Result<Response<RaftMessage>, Status> {
-    let payload = serde_json::to_vec(result).map_err(|e| Status::internal(e.to_string()))?;
+    let payload = bincode::serialize(result).map_err(|e| Status::internal(e.to_string()))?;
     Ok(Response::new(RaftMessage { payload }))
 }
 
 #[allow(clippy::result_large_err)]
 fn decode<T: DeserializeOwned>(request: Request<RaftMessage>) -> Result<T, Status> {
-    serde_json::from_slice(&request.into_inner().payload)
+    bincode::deserialize(&request.into_inner().payload)
         .map_err(|e| Status::invalid_argument(format!("bad Raft message payload: {e}")))
 }
 

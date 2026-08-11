@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 470" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+  <rect width="860" height="470" rx="8" fill="#0d1117"/>
+
+  <!-- client -->
+  <rect x="365" y="22" width="130" height="40" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="430" y="47" text-anchor="middle" fill="#c9d1d9" font-size="15">client</text>
+
+  <!-- aggregator -->
+  <rect x="305" y="110" width="250" height="64" rx="6" fill="#0f2438" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="430" y="137" text-anchor="middle" fill="#58a6ff" font-size="15" font-weight="bold">aggregator</text>
+  <text x="430" y="158" text-anchor="middle" fill="#8b949e" font-size="12">stateless · route writes · fan-out reads · merge top-k</text>
+
+  <!-- client -> aggregator -->
+  <line x1="430" y1="62" x2="430" y2="106" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="443" y="90" fill="#8b949e" font-size="11">gRPC</text>
+
+  <!-- fan-out lines -->
+  <line x1="380" y1="174" x2="235" y2="242" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="480" y1="174" x2="625" y2="242" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="430" y="215" text-anchor="middle" fill="#8b949e" font-size="11">parallel fan-out · leader-aware retry</text>
+
+  <!-- shard 0 -->
+  <rect x="60" y="248" width="350" height="170" rx="6" fill="#101a12" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="235" y="276" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="bold">shard 0 · Raft group</text>
+  <rect x="90" y="296" width="88" height="60" rx="5" fill="#12261a" stroke="#3fb950" stroke-width="2"/>
+  <text x="134" y="322" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold">leader</text>
+  <text x="134" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 1</text>
+  <rect x="192" y="296" width="88" height="60" rx="5" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="236" y="322" text-anchor="middle" fill="#c9d1d9" font-size="13">follower</text>
+  <text x="236" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 2</text>
+  <rect x="294" y="296" width="88" height="60" rx="5" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="338" y="322" text-anchor="middle" fill="#c9d1d9" font-size="13">follower</text>
+  <text x="338" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 3</text>
+  <text x="235" y="394" text-anchor="middle" fill="#8b949e" font-size="11">writes commit to a majority before ack</text>
+
+  <!-- shard 1 -->
+  <rect x="450" y="248" width="350" height="170" rx="6" fill="#101a12" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="625" y="276" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="bold">shard 1 · Raft group</text>
+  <rect x="480" y="296" width="88" height="60" rx="5" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="524" y="322" text-anchor="middle" fill="#c9d1d9" font-size="13">follower</text>
+  <text x="524" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 1</text>
+  <rect x="582" y="296" width="88" height="60" rx="5" fill="#12261a" stroke="#3fb950" stroke-width="2"/>
+  <text x="626" y="322" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold">leader</text>
+  <text x="626" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 2</text>
+  <rect x="684" y="296" width="88" height="60" rx="5" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="728" y="322" text-anchor="middle" fill="#c9d1d9" font-size="13">follower</text>
+  <text x="728" y="341" text-anchor="middle" fill="#8b949e" font-size="11">replica 3</text>
+  <text x="625" y="394" text-anchor="middle" fill="#8b949e" font-size="11">vectors partitioned by fxhash(id) % shards</text>
+
+  <!-- footer -->
+  <text x="430" y="448" text-anchor="middle" fill="#8b949e" font-size="12">exact top-k: shards partition disjointly, so merged local top-k == single-node scan</text>
+</svg>

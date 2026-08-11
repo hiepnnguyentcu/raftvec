@@ -82,14 +82,11 @@ message ClusterStatusResponse {
   uint32 vector_count = 2;
 }
 
-// Internal transport between replicas of the same shard's Raft group
-// (technical design §4.2, §6). openraft's request/response types are
-// generic Rust structs whose shape can shift across versions; rather than
-// hand-modeling every field as proto messages (brittle, purely redundant
-// with what openraft already defines), each RPC carries the JSON-serialized
-// openraft request/response as opaque bytes. The proto contract here is
-// deliberately just "a Raft message got from A to B", not "here is Raft's
-// wire format" -- openraft owns that.
+// Internal transport between replicas of the same shard's Raft group.
+// openraft's request/response types are version-sensitive generics, so
+// each RPC carries the bincode-serialized request/response as opaque
+// bytes rather than hand-modeled proto messages. The contract here is "a
+// Raft message got from A to B" — openraft owns the payload shape.
 service ShardRaft {
   rpc AppendEntries(RaftMessage) returns (RaftMessage);
   rpc Vote(RaftMessage) returns (RaftMessage);

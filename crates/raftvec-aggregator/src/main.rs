@@ -1,4 +1,6 @@
+use anyhow::Context;
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use raftvec_aggregator::router::ShardRouter;
 use raftvec_aggregator::service::AggregatorService;
 use raftvec_proto::raft_vec_server::RaftVecServer;
@@ -7,10 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Server;
 
-/// raftvec-aggregator (M3): stateless fan-out/routing layer in front of a
-/// fixed set of shards, each a fixed set of Raft replicas. No local state
-/// -- everything durable lives on the replicas it talks to (technical
-/// design §2.3).
+/// Stateless fan-out/routing layer in front of a fixed set of shards,
+/// each a fixed set of Raft replicas. All durable state lives on the
+/// replicas, so the aggregator can be killed and restarted freely.
 #[derive(Parser, Debug)]
 #[command(name = "raftvec-aggregator")]
 struct Args {
@@ -26,9 +27,13 @@ struct Args {
     shards: Vec<String>,
 
     /// Per-shard search deadline in milliseconds before that shard is
-    /// dropped from the merge (technical design §5.3).
+    /// dropped from the merge and reported in `shards_failed`.
     #[arg(long, default_value_t = 2000)]
     deadline_ms: u64,
+
+    /// Address the Prometheus /metrics endpoint is served on.
+    #[arg(long, default_value = "0.0.0.0:9101")]
+    metrics_listen: SocketAddr,
 }
 
 fn normalize(addr: &str) -> String {
@@ -44,6 +49,13 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+
+    PrometheusBuilder::new()
+        .with_http_listener(args.metrics_listen)
+        .install()
+        .context("installing Prometheus exporter")?;
+    tracing::info!(addr = %args.metrics_listen, "serving /metrics");
+
     let shard_replica_addrs: Vec<Vec<String>> = args
         .shards
         .iter()
@@ -57,7 +69,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %args.listen, shard_count = shard_replica_addrs.len(), "raftvec-aggregator listening");
 
     Server::builder()
-        .add_service(RaftVecServer::new(service))
+        .add_service(
+            RaftVecServer::new(service)
+                .max_decoding_message_size(raftvec_aggregator::router::MAX_MESSAGE_SIZE)
+                .max_encoding_message_size(raftvec_aggregator::router::MAX_MESSAGE_SIZE),
+        )
         .serve(args.listen)
         .await?;
 

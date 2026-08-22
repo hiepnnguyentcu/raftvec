@@ -17,6 +17,8 @@ with zero acknowledged writes lost.
 
 *A shard leader killed at t=30s under 200 QPS. The median never notices. 18,001/18,001 requests OK.*
 
+This project is inspired by a lot from MuopDB - Check it out here!: https://github.com/hicder/muopdb
+
 </div>
 
 ---
